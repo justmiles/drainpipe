@@ -1,0 +1,16 @@
+# Keep the build context lean
+# ── Always exclude ──
+.git
+.devbox
+.agents
+.envrc
+*.md
+*.log
+*.bak
+docs/
+powerpipe/
+bin/
+*.yaml
+
+# ── Docker / compose files (not needed inside builds) ──
+docker-compose.yml
