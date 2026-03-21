@@ -1,0 +1,8 @@
+FROM gcr.io/distroless/static:nonroot
+
+COPY drainpipe /drainpipe
+
+USER nonroot:nonroot
+
+ENTRYPOINT ["/drainpipe"]
+CMD ["drain"]
