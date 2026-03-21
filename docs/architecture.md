@@ -10,26 +10,26 @@ Drainpipe runs Steampipe plugins **in-process** (no external Steampipe daemon), 
 │                                                                     │
 │  Config ──► Provider ──► Exporter ──► Importer ──► PostgreSQL       │
 │  (YAML)     (AWS)        (Steampipe    (Staging     (Live tables    │
-│                           plugin,       table        with tracking   │
-│                           in-process)   pattern)     columns)        │
+│                           plugin,       table        with tracking  │
+│                           in-process)   pattern)     columns)       │
 │                                                                     │
 │  Worker Pool (concurrency N)                                        │
-│  ┌──────┐ ┌──────┐ ┌──────┐                                        │
-│  │ W1   │ │ W2   │ │ WN   │  ← (account, table) work items         │
-│  └──────┘ └──────┘ └──────┘                                        │
+│  ┌──────┐ ┌──────┐ ┌──────┐                                         │
+│  │ W1   │ │ W2   │ │ WN   │  ← (account, table) work items          │
+│  └──────┘ └──────┘ └──────┘                                         │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Packages
 
-| Package | Responsibility |
-|---------|---------------|
+| Package    | Responsibility                                                           |
+| ---------- | ------------------------------------------------------------------------ |
 | `provider` | Cloud provider abstraction (credentials, account identity, natural keys) |
-| `exporter` | Wraps Steampipe plugins in-process for batch data export |
-| `importer` | Staging-table upsert pattern, scoped by `_source_account` |
-| `schema` | Dynamic PostgreSQL table creation and schema evolution |
-| `match` | Glob-based table pattern matching with fuzzy suggestions |
-| `config` | Database connection and drainpipe YAML configuration |
+| `exporter` | Wraps Steampipe plugins in-process for batch data export                 |
+| `importer` | Staging-table upsert pattern, scoped by `_source_account`                |
+| `schema`   | Dynamic PostgreSQL table creation and schema evolution                   |
+| `match`    | Glob-based table pattern matching with fuzzy suggestions                 |
+| `config`   | Database connection and drainpipe YAML configuration                     |
 
 ## Data Flow
 
@@ -43,12 +43,12 @@ Drainpipe runs Steampipe plugins **in-process** (no external Steampipe daemon), 
 
 Every row in every table includes these tracking columns, managed by Drainpipe (not the Steampipe plugin):
 
-| Column | Purpose |
-|--------|---------|
+| Column            | Purpose                                                  |
+| ----------------- | -------------------------------------------------------- |
 | `_source_account` | Scopes data by AWS account (or Azure subscription, etc.) |
-| `_first_seen_at` | When the resource was first collected |
-| `_last_seen_at` | When the resource was last seen |
-| `_deleted_at` | Set when a resource disappears from the cloud provider |
+| `_first_seen_at`  | When the resource was first collected                    |
+| `_last_seen_at`   | When the resource was last seen                          |
+| `_deleted_at`     | Set when a resource disappears from the cloud provider   |
 
 ## Natural Key Resolution
 
@@ -65,15 +65,21 @@ Drainpipe uses a **table-level worker pool**. Work items are `(account, table)` 
 Progress is logged every 30 seconds:
 
 ```json
-{"completed":45,"failed":3,"total":320,"percent":15,"message":"progress"}
+{
+  "completed": 45,
+  "failed": 3,
+  "total": 320,
+  "percent": 15,
+  "message": "progress"
+}
 ```
 
 ## Retry Behavior
 
-| Error Type | Behavior |
-|---|---|
-| Transient (API errors, throttling) | Retry with exponential backoff + jitter |
-| Timeout (`context deadline exceeded`) | Fail immediately, no retry |
-| Context canceled (Ctrl+C, strict abort) | Fail immediately |
+| Error Type                              | Behavior                                |
+| --------------------------------------- | --------------------------------------- |
+| Transient (API errors, throttling)      | Retry with exponential backoff + jitter |
+| Timeout (`context deadline exceeded`)   | Fail immediately, no retry              |
+| Context canceled (Ctrl+C, strict abort) | Fail immediately                        |
 
 The `table_timeout` is a single **overall budget** for all attempts — retries happen within it, not with fresh timeouts.

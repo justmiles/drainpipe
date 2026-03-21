@@ -1,0 +1,79 @@
+# Drainpipe Configuration
+#
+# Place this file as drainpipe.yaml in your working directory,
+# or specify a path with: drainpipe drain --config /path/to/config.yaml
+#
+# A single file may contain multiple YAML documents separated by "---".
+# Each document is a complete, independent config block.
+
+# ── Operational settings ───────────────────────────────────────────
+concurrency: 5          # parallel table exports  (default: 1)
+retries: 3              # max retry attempts       (default: 3)
+retry_delay: 10s        # base delay between retries, exponential backoff w/ jitter (default: 10s)
+table_timeout: 30m      # overall budget per table including all retries (default: 10m)
+strict: true            # abort on any table failure or zero-match patterns (default: false)
+
+# ── Provider settings ─────────────────────────────────────────────────────────
+provider: aws
+
+# Named profile (optional).
+profile: my-profile
+
+regions:
+  - us-east-1
+  - us-west-2
+
+# ── Tables ─────────────────────────────────────────────────────────
+# Supports glob patterns. Omit to collect all supported tables.
+# Only tables with discoverable natural keys are eligible.
+tables:
+  - "aws_ec2_*"
+  - "aws_s3_*"
+  - "aws_iam_*"
+  - "aws_rds_*"
+
+  # Object form with server-side filtering (where clause).
+  # Keys are column names; values are pushed down as quals to Steampipe.
+  - table: aws_ecs_task_definition
+    where:
+      status: ACTIVE
+---
+# ── Multi-account: explicit accounts ───────────────
+# Use this to target specific accounts
+# Regions inherit from the top-level `regions` unless overridden.
+
+provider: aws
+
+accounts:
+  - name: prod
+    profile: prod.ReadOnlyRole
+  - name: staging
+    profile: staging.ReadOnlyRole
+    regions: [us-east-1]          # override regions for this account
+
+# ── Multi-account: AWS Organizations mode ─────────────────────────
+# Automatically discovers member accounts via Organizations API.
+# Omit this section entirely for single-account or explicit-accounts mode.
+
+org:
+  role_name: ReadOnlyCollectorRole
+  admin_account_id: "123456789012"
+
+  # Per-account overrides. Evaluated in order; first match wins.
+  overrides:
+    # Dev/sandbox accounts: only collect EC2 instances and S3 buckets
+    - match:
+        account_names: ["*-dev", "*-sandbox", "*-test"]
+      tables:
+        - "aws_ec2_instance"
+        - "aws_s3_bucket"
+
+    # Skip a specific account entirely
+    - match:
+        account_ids: ["999999999999"]
+      skip: true
+
+    # Production accounts: collect all supported tables
+    - match:
+        account_names: ["*-prod", "*-production"]
+      tables: ["*"]

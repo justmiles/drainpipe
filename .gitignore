@@ -1,6 +1,8 @@
 bin/
 .devbox
 *.yaml
+!.goreleaser.yaml
+!example.yaml
 *.bak
 *.log
 .envrc
