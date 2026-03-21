@@ -4,7 +4,7 @@ project_name: drainpipe
 
 before:
   hooks:
-    - cd cmd && go mod tidy
+    - sh -c "cd cmd && go mod tidy"
 
 builds:
   - id: drainpipe
@@ -46,49 +46,20 @@ changelog:
       - "^ci:"
       - "^chore:"
 
-dockers:
-  - id: amd64
-    goos: linux
-    goarch: amd64
-    image_templates:
-      - "ghcr.io/justmiles/drainpipe:{{ .Version }}-amd64"
-      - "ghcr.io/justmiles/drainpipe:latest-amd64"
+dockers_v2:
+  - images:
+      - "ghcr.io/justmiles/drainpipe"
+    tags:
+      - "{{ .Version }}"
+      - latest
     dockerfile: Dockerfile.goreleaser
-    build_flag_templates:
-      - "--platform=linux/amd64"
-      - "--label=org.opencontainers.image.title=drainpipe"
-      - "--label=org.opencontainers.image.description=Steampipe export to PostgreSQL — drain cloud resources into your own database"
-      - "--label=org.opencontainers.image.source=https://github.com/justmiles/drainpipe"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.created={{ .Date }}"
-
-  - id: arm64
-    goos: linux
-    goarch: arm64
-    image_templates:
-      - "ghcr.io/justmiles/drainpipe:{{ .Version }}-arm64"
-      - "ghcr.io/justmiles/drainpipe:latest-arm64"
-    dockerfile: Dockerfile.goreleaser
-    build_flag_templates:
-      - "--platform=linux/arm64"
-      - "--label=org.opencontainers.image.title=drainpipe"
-      - "--label=org.opencontainers.image.description=Steampipe export to PostgreSQL — drain cloud resources into your own database"
-      - "--label=org.opencontainers.image.source=https://github.com/justmiles/drainpipe"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.created={{ .Date }}"
-
-docker_manifests:
-  - name_template: "ghcr.io/justmiles/drainpipe:{{ .Version }}"
-    image_templates:
-      - "ghcr.io/justmiles/drainpipe:{{ .Version }}-amd64"
-      - "ghcr.io/justmiles/drainpipe:{{ .Version }}-arm64"
-
-  - name_template: "ghcr.io/justmiles/drainpipe:latest"
-    image_templates:
-      - "ghcr.io/justmiles/drainpipe:latest-amd64"
-      - "ghcr.io/justmiles/drainpipe:latest-arm64"
+    labels:
+      org.opencontainers.image.title: drainpipe
+      org.opencontainers.image.description: "Steampipe export to PostgreSQL — drain cloud resources into your own database"
+      org.opencontainers.image.source: "https://github.com/justmiles/drainpipe"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.created: "{{ .Date }}"
 
 release:
   github:

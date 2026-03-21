@@ -1,6 +1,7 @@
 FROM gcr.io/distroless/static:nonroot
 
-COPY drainpipe /drainpipe
+ARG TARGETPLATFORM
+COPY ${TARGETPLATFORM}/drainpipe /drainpipe
 
 USER nonroot:nonroot
 
