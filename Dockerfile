@@ -12,7 +12,8 @@ RUN go mod download
 
 # Copy source and build a static binary
 COPY cmd/ .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
     go build -ldflags="-s -w" -trimpath -o /drainpipe .
 
 # ── Runtime stage ──────────────────────────────────────────────────────
