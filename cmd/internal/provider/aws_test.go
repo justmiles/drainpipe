@@ -1,19 +1,15 @@
 package provider
 
 import (
-	"context"
-	"fmt"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/turbot/steampipe-plugin-sdk/v5/grpc/proto"
 )
 
-// ---------- NaturalKeyColumns ----------
+// ---------- NaturalKeyColumns (now config-driven) ----------
 
-func TestAWS_NaturalKeyColumns_WithARN(t *testing.T) {
-	p := &AWSProvider{}
+func TestNaturalKeyColumns_WithPreferredKey(t *testing.T) {
 	schema := &proto.TableSchema{
 		Columns: []*proto.ColumnDefinition{
 			{Name: "name"},
@@ -25,14 +21,13 @@ func TestAWS_NaturalKeyColumns_WithARN(t *testing.T) {
 		},
 	}
 
-	got := p.NaturalKeyColumns("aws_s3_bucket", schema)
+	got := NaturalKeyColumns("aws_s3_bucket", schema, "arn")
 	if len(got) != 1 || got[0] != "arn" {
 		t.Errorf("NaturalKeyColumns() = %v, want [arn]", got)
 	}
 }
 
-func TestAWS_NaturalKeyColumns_WithoutARN(t *testing.T) {
-	p := &AWSProvider{}
+func TestNaturalKeyColumns_PreferredKeyMissing(t *testing.T) {
 	schema := &proto.TableSchema{
 		Columns: []*proto.ColumnDefinition{
 			{Name: "name"},
@@ -43,196 +38,86 @@ func TestAWS_NaturalKeyColumns_WithoutARN(t *testing.T) {
 		},
 	}
 
-	got := p.NaturalKeyColumns("aws_sts_caller_identity", schema)
+	got := NaturalKeyColumns("aws_sts_caller_identity", schema, "arn")
 	if len(got) != 1 || got[0] != "name" {
 		t.Errorf("NaturalKeyColumns() = %v, want [name]", got)
 	}
 }
 
-func TestAWS_NaturalKeyColumns_NilSchema(t *testing.T) {
-	p := &AWSProvider{}
-	got := p.NaturalKeyColumns("aws_foo", nil)
+func TestNaturalKeyColumns_NilSchema(t *testing.T) {
+	got := NaturalKeyColumns("aws_foo", nil, "arn")
 	if got != nil {
 		t.Errorf("NaturalKeyColumns(nil) = %v, want nil", got)
 	}
 }
 
-func TestAWS_NaturalKeyColumns_NoKeysNoARN(t *testing.T) {
-	p := &AWSProvider{}
+func TestNaturalKeyColumns_NoPreferredNoKeys(t *testing.T) {
 	schema := &proto.TableSchema{
 		Columns: []*proto.ColumnDefinition{
 			{Name: "name"},
 		},
 	}
-	got := p.NaturalKeyColumns("aws_foo", schema)
+	got := NaturalKeyColumns("aws_foo", schema, "")
 	if got != nil {
-		t.Errorf("NaturalKeyColumns(no arn, no keys) = %v, want nil", got)
+		t.Errorf("NaturalKeyColumns(no pref, no keys) = %v, want nil", got)
 	}
 }
 
-// ---------- DefaultConnectionConfig ----------
+func TestNaturalKeyColumns_IDPreferred(t *testing.T) {
+	schema := &proto.TableSchema{
+		Columns: []*proto.ColumnDefinition{
+			{Name: "id"},
+			{Name: "name"},
+		},
+		GetCallKeyColumnList: []*proto.KeyColumn{
+			{Name: "name", Require: "required"},
+		},
+	}
 
-func TestAWS_DefaultConnectionConfig_Empty(t *testing.T) {
-	// Ensure env vars don't interfere
-	os.Unsetenv("AWS_PROFILE")
-	os.Unsetenv("AWS_REGIONS")
-	p := &AWSProvider{}
-	got := p.DefaultConnectionConfig()
-	if got != "" {
-		t.Errorf("DefaultConnectionConfig() = %q, want empty", got)
+	got := NaturalKeyColumns("azure_resource_group", schema, "id")
+	if len(got) != 1 || got[0] != "id" {
+		t.Errorf("NaturalKeyColumns() = %v, want [id]", got)
 	}
 }
 
-func TestAWS_DefaultConnectionConfig_WithProfile(t *testing.T) {
-	os.Unsetenv("AWS_PROFILE")
-	os.Unsetenv("AWS_REGIONS")
-	p := &AWSProvider{Profile: "my-profile"}
-	got := p.DefaultConnectionConfig()
-	if !strings.Contains(got, `profile = "my-profile"`) {
-		t.Errorf("DefaultConnectionConfig() = %q, missing profile", got)
-	}
-}
+// ---------- AWSMultiAccount helpers ----------
 
-func TestAWS_DefaultConnectionConfig_WithRegions(t *testing.T) {
-	os.Unsetenv("AWS_PROFILE")
-	os.Unsetenv("AWS_REGIONS")
-	p := &AWSProvider{Regions: []string{"us-east-1", "eu-west-1"}}
-	got := p.DefaultConnectionConfig()
-	if !strings.Contains(got, "regions") {
-		t.Errorf("DefaultConnectionConfig() = %q, missing regions", got)
-	}
-	if !strings.Contains(got, `"us-east-1"`) || !strings.Contains(got, `"eu-west-1"`) {
-		t.Errorf("DefaultConnectionConfig() = %q, missing region values", got)
-	}
-}
-
-func TestAWS_DefaultConnectionConfig_WithBoth(t *testing.T) {
-	os.Unsetenv("AWS_PROFILE")
-	os.Unsetenv("AWS_REGIONS")
-	p := &AWSProvider{
-		Profile: "prod",
-		Regions: []string{"us-west-2"},
-	}
-	got := p.DefaultConnectionConfig()
-	if !strings.Contains(got, `profile = "prod"`) {
-		t.Errorf("missing profile in %q", got)
-	}
-	if !strings.Contains(got, `"us-west-2"`) {
-		t.Errorf("missing region in %q", got)
-	}
-}
-
-// ---------- ResolveAccount ----------
-
-func TestAWS_ResolveAccount_Success(t *testing.T) {
-	p := &AWSProvider{}
-	queryFunc := func(ctx context.Context, table string) (map[string]interface{}, error) {
-		if table != "aws_sts_caller_identity" {
-			t.Errorf("Unexpected table queried: %s", table)
-		}
-		return map[string]interface{}{"account_id": "123456789012"}, nil
-	}
-
-	acct, err := p.ResolveAccount(context.Background(), queryFunc)
-	if err != nil {
-		t.Fatalf("ResolveAccount() error = %v", err)
-	}
-	if acct != "123456789012" {
-		t.Errorf("ResolveAccount() = %q, want %q", acct, "123456789012")
-	}
-}
-
-func TestAWS_ResolveAccount_NilRow(t *testing.T) {
-	p := &AWSProvider{}
-	queryFunc := func(ctx context.Context, table string) (map[string]interface{}, error) {
-		return nil, nil
-	}
-
-	_, err := p.ResolveAccount(context.Background(), queryFunc)
-	if err == nil {
-		t.Error("ResolveAccount() should error on nil row")
-	}
-}
-
-func TestAWS_ResolveAccount_MissingAccountID(t *testing.T) {
-	p := &AWSProvider{}
-	queryFunc := func(ctx context.Context, table string) (map[string]interface{}, error) {
-		return map[string]interface{}{"user_id": "AIDA..."}, nil
-	}
-
-	_, err := p.ResolveAccount(context.Background(), queryFunc)
-	if err == nil {
-		t.Error("ResolveAccount() should error on missing account_id")
-	}
-}
-
-func TestAWS_ResolveAccount_QueryError(t *testing.T) {
-	p := &AWSProvider{}
-	queryFunc := func(ctx context.Context, table string) (map[string]interface{}, error) {
-		return nil, fmt.Errorf("connection refused")
-	}
-
-	_, err := p.ResolveAccount(context.Background(), queryFunc)
-	if err == nil {
-		t.Error("ResolveAccount() should propagate query error")
-	}
-	if !strings.Contains(err.Error(), "connection refused") {
-		t.Errorf("error = %v, want to contain 'connection refused'", err)
-	}
-}
-
-func TestAWS_ResolveAccount_NilAccountID(t *testing.T) {
-	p := &AWSProvider{}
-	queryFunc := func(ctx context.Context, table string) (map[string]interface{}, error) {
-		return map[string]interface{}{"account_id": nil}, nil
-	}
-
-	_, err := p.ResolveAccount(context.Background(), queryFunc)
-	if err == nil {
-		t.Error("ResolveAccount() should error on nil account_id value")
-	}
-}
-
-// ---------- resolveProfile ----------
-
-func TestAWS_ResolveProfile_StructField(t *testing.T) {
+func TestAWSMultiAccount_ResolveProfile_StructField(t *testing.T) {
 	t.Setenv("AWS_PROFILE", "env-profile")
-	p := &AWSProvider{Profile: "struct-profile"}
+	p := &AWSMultiAccount{Profile: "struct-profile"}
 	if got := p.resolveProfile(); got != "struct-profile" {
 		t.Errorf("resolveProfile() = %q, want struct-profile (struct takes priority)", got)
 	}
 }
 
-func TestAWS_ResolveProfile_EnvFallback(t *testing.T) {
+func TestAWSMultiAccount_ResolveProfile_EnvFallback(t *testing.T) {
 	t.Setenv("AWS_PROFILE", "env-profile")
-	p := &AWSProvider{}
+	p := &AWSMultiAccount{}
 	if got := p.resolveProfile(); got != "env-profile" {
 		t.Errorf("resolveProfile() = %q, want env-profile", got)
 	}
 }
 
-func TestAWS_ResolveProfile_Empty(t *testing.T) {
+func TestAWSMultiAccount_ResolveProfile_Empty(t *testing.T) {
 	os.Unsetenv("AWS_PROFILE")
-	p := &AWSProvider{}
+	p := &AWSMultiAccount{}
 	if got := p.resolveProfile(); got != "" {
 		t.Errorf("resolveProfile() = %q, want empty", got)
 	}
 }
 
-// ---------- resolveRegions ----------
-
-func TestAWS_ResolveRegions_StructField(t *testing.T) {
+func TestAWSMultiAccount_ResolveRegions_StructField(t *testing.T) {
 	t.Setenv("AWS_REGIONS", "ap-southeast-1")
-	p := &AWSProvider{Regions: []string{"us-east-1"}}
+	p := &AWSMultiAccount{Regions: []string{"us-east-1"}}
 	got := p.resolveRegions()
 	if len(got) != 1 || got[0] != "us-east-1" {
 		t.Errorf("resolveRegions() = %v, want [us-east-1] (struct takes priority)", got)
 	}
 }
 
-func TestAWS_ResolveRegions_EnvFallback(t *testing.T) {
+func TestAWSMultiAccount_ResolveRegions_EnvFallback(t *testing.T) {
 	t.Setenv("AWS_REGIONS", "us-west-2, eu-central-1")
-	p := &AWSProvider{}
+	p := &AWSMultiAccount{}
 	got := p.resolveRegions()
 	if len(got) != 2 {
 		t.Fatalf("resolveRegions() = %v, want 2 regions", got)
@@ -242,16 +127,14 @@ func TestAWS_ResolveRegions_EnvFallback(t *testing.T) {
 	}
 }
 
-func TestAWS_ResolveRegions_Empty(t *testing.T) {
+func TestAWSMultiAccount_ResolveRegions_Empty(t *testing.T) {
 	os.Unsetenv("AWS_REGIONS")
-	p := &AWSProvider{}
+	p := &AWSMultiAccount{}
 	got := p.resolveRegions()
 	if got != nil {
 		t.Errorf("resolveRegions() = %v, want nil", got)
 	}
 }
-
-// ---------- regionsHCL ----------
 
 func TestRegionsHCL_Empty(t *testing.T) {
 	got := regionsHCL(nil)
@@ -282,8 +165,6 @@ func TestRegionsHCL_MultipleRegions(t *testing.T) {
 	}
 }
 
-// ---------- stringVal / strPtr ----------
-
 func TestStringVal_Nil(t *testing.T) {
 	if got := stringVal(nil); got != "" {
 		t.Errorf("stringVal(nil) = %q, want empty", got)
@@ -304,18 +185,19 @@ func TestStrPtr(t *testing.T) {
 	}
 }
 
-// ---------- Name / PluginFunc ----------
-
-func TestAWS_Name(t *testing.T) {
-	p := &AWSProvider{}
-	if got := p.Name(); got != "aws" {
-		t.Errorf("Name() = %q, want %q", got, "aws")
+func TestNewAWSMultiAccount(t *testing.T) {
+	ma := NewAWSMultiAccount("my-profile", []string{"us-east-1"}, &OrgSettings{
+		RoleName:       "MyRole",
+		AdminAccountID: "123456789012",
+		Organizations:  []string{"ou-1234"},
+	})
+	if ma.Profile != "my-profile" {
+		t.Errorf("Profile = %q, want my-profile", ma.Profile)
 	}
-}
-
-func TestAWS_PluginFunc(t *testing.T) {
-	p := &AWSProvider{}
-	if p.PluginFunc() == nil {
-		t.Error("PluginFunc() = nil, want non-nil")
+	if ma.OrgRoleName != "MyRole" {
+		t.Errorf("OrgRoleName = %q, want MyRole", ma.OrgRoleName)
+	}
+	if len(ma.Regions) != 1 || ma.Regions[0] != "us-east-1" {
+		t.Errorf("Regions = %v, want [us-east-1]", ma.Regions)
 	}
 }

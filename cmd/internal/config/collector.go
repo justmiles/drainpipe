@@ -12,6 +12,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// FilterQuery defines a dynamic pre-filter for table collection. The SQL
+// query runs against the destination Postgres before collection begins;
+// each result value becomes an equality qual on Column, turning a full
+// table scan into N targeted API calls.
+type FilterQuery struct {
+	Column string `yaml:"column"`
+	Query  string `yaml:"query"`
+}
+
 // TableEntry represents a table in the config. It supports two YAML forms:
 //
 //   - "aws_s3_bucket"                          (plain string, no filter)
@@ -19,8 +28,10 @@ import (
 //     where:
 //     status: ACTIVE
 type TableEntry struct {
-	Name  string            `yaml:"table"`
-	Where map[string]string `yaml:"where"`
+	Name        string            `yaml:"table"`
+	Where       map[string]string `yaml:"where"`
+	Columns     []string          `yaml:"columns"`
+	FilterQuery *FilterQuery      `yaml:"filter_query"`
 }
 
 // UnmarshalYAML allows a TableEntry to be specified as either a plain string
@@ -59,21 +70,203 @@ func TableEntryMap(entries []TableEntry) map[string]TableEntry {
 }
 
 // DrainpipeConfig holds the full drainpipe configuration, typically loaded
-// from a drainpipe.yaml file.
+// from a drainpipe.yaml file. Supports both provider-shorthand and explicit
+// plugin-based out-of-process config.
 type DrainpipeConfig struct {
-	Provider      string         `yaml:"provider"`
-	Profile       string         `yaml:"profile"`
-	Regions       []string       `yaml:"regions"`
-	Tables        []TableEntry   `yaml:"tables"`
-	Concurrency   int            `yaml:"concurrency"`
-	Retries       int            `yaml:"retries"`
-	RetryDelay    time.Duration  `yaml:"retry_delay"`
-	TableTimeout  time.Duration  `yaml:"table_timeout"`
-	Strict        bool           `yaml:"strict"`
-	Accounts      []AccountEntry `yaml:"accounts"`
-	Org           *OrgConfig     `yaml:"org"`
-	Organizations []string       `yaml:"organizations"` // OU IDs to discover accounts from
-	AssumeRoleName string        `yaml:"assume_role_name"` // IAM role name to assume in each account
+	// ── Provider / plugin selection ──────────────────────────────
+	Provider   string `yaml:"provider"`
+	Plugin     string `yaml:"plugin"`      // e.g. "turbot/aws@1.30.0"
+	PluginPath string `yaml:"plugin_path"` // explicit binary path (overrides download)
+
+	// ── Connection config ────────────────────────────────────────
+	// All provider-specific settings live here: credentials, regions,
+	// multi-account orchestration, and arbitrary Steampipe plugin config.
+	Connection ConnectionConfig `yaml:"connection"`
+
+	// ── Identity & natural keys ─────────────────────────────────
+	IdentityTable  string `yaml:"identity_table"`  // e.g. "aws_sts_caller_identity"
+	IdentityColumn string `yaml:"identity_column"` // e.g. "account_id"
+	NaturalKey     string `yaml:"natural_key"`     // preferred natural key column (e.g. "arn", "id")
+
+	// ── Shared fields ───────────────────────────────────────────
+	Tables        []TableEntry  `yaml:"tables"`
+	Concurrency   int           `yaml:"concurrency"`
+	Retries       int           `yaml:"retries"`
+	RetryDelay    time.Duration `yaml:"retry_delay"`
+	TableTimeout  time.Duration `yaml:"table_timeout"`
+	Strict        bool          `yaml:"strict"`
+	DeepHydration *bool         `yaml:"deep_hydration"` // nil = true (default); false skips hydrate-only columns
+}
+
+// ConnectionConfig holds all provider-specific configuration. Typed fields
+// cover well-known keys (credentials, AWS multi-account). The Extra map
+// captures any additional key-value pairs that get passed through to the
+// Steampipe plugin as HCL connection config.
+type ConnectionConfig struct {
+	// Steampipe connection credentials (also passed through as HCL)
+	Profile string   `yaml:"profile,omitempty"`
+	Regions []string `yaml:"regions,omitempty"`
+
+	// Provider identity (drainpipe-only, NOT passed to steampipe)
+	AccountID string `yaml:"account_id,omitempty"`
+
+	// AWS multi-account orchestration (drainpipe-only, NOT passed to steampipe)
+	Accounts       []AccountEntry `yaml:"accounts,omitempty"`
+	Org            *OrgConfig     `yaml:"org,omitempty"`
+	Organizations  []string       `yaml:"organizations,omitempty"`
+	AssumeRoleName string         `yaml:"assume_role_name,omitempty"`
+
+	// Arbitrary Steampipe plugin config (token, max_error_retry_attempts, …)
+	Extra map[string]interface{} `yaml:",inline"`
+}
+
+// ProviderDefaults holds the default plugin settings for a known provider name.
+// When a user specifies "provider: aws" without explicit plugin fields, these
+// defaults are applied.
+type ProviderDefaults struct {
+	Plugin         string // e.g. "turbot/aws@latest"
+	IdentityTable  string // e.g. "aws_sts_caller_identity"
+	IdentityColumn string // e.g. "account_id"
+	NaturalKey     string // e.g. "arn"
+}
+
+// KnownProviders maps short provider names to their default plugin settings.
+var KnownProviders = map[string]ProviderDefaults{
+	"aws": {
+		Plugin:         "turbot/aws@latest",
+		IdentityTable:  "aws_sts_caller_identity",
+		IdentityColumn: "account_id",
+		NaturalKey:     "arn",
+	},
+	"azure": {
+		Plugin:         "turbot/azure@latest",
+		IdentityTable:  "azure_subscription",
+		IdentityColumn: "subscription_id",
+		NaturalKey:     "id",
+	},
+	"cloudflare": {
+		Plugin:         "turbot/cloudflare@latest",
+		IdentityTable:  "cloudflare_account",
+		IdentityColumn: "id",
+		NaturalKey:     "id",
+	},
+}
+
+// ResolvePluginSpec returns the plugin specifier for this config, merging
+// legacy provider shorthand with explicit plugin fields. Returns the effective
+// plugin spec and whether this config has a valid plugin configuration.
+func (c *DrainpipeConfig) ResolvePluginSpec() (string, bool) {
+	if c.Plugin != "" {
+		return c.Plugin, true
+	}
+	if c.Provider != "" {
+		if defaults, ok := KnownProviders[c.Provider]; ok {
+			return defaults.Plugin, true
+		}
+	}
+	return "", false
+}
+
+// ResolveIdentity returns the identity table and column for account resolution.
+func (c *DrainpipeConfig) ResolveIdentity() (table, column string) {
+	table = c.IdentityTable
+	column = c.IdentityColumn
+	if table == "" || column == "" {
+		if defaults, ok := KnownProviders[c.Provider]; ok {
+			if table == "" {
+				table = defaults.IdentityTable
+			}
+			if column == "" {
+				column = defaults.IdentityColumn
+			}
+		}
+	}
+	return table, column
+}
+
+// ResolveNaturalKey returns the preferred natural key column name.
+func (c *DrainpipeConfig) ResolveNaturalKey() string {
+	if c.NaturalKey != "" {
+		return c.NaturalKey
+	}
+	if defaults, ok := KnownProviders[c.Provider]; ok {
+		return defaults.NaturalKey
+	}
+	return ""
+}
+
+// ResolveConnectionHCL builds the HCL connection config string from the
+// typed connection fields and the Extra catch-all map. Orchestration-only
+// fields (accounts, org, organizations, assume_role_name) are excluded.
+func (c *DrainpipeConfig) ResolveConnectionHCL() string {
+	conn := make(map[string]interface{})
+
+	// Copy Extra entries first (arbitrary plugin config)
+	for k, v := range c.Connection.Extra {
+		conn[k] = v
+	}
+
+	// Add typed credential fields (override Extra if both present)
+	if c.Connection.Profile != "" {
+		conn["profile"] = c.Connection.Profile
+	}
+	if len(c.Connection.Regions) > 0 {
+		regions := make([]interface{}, len(c.Connection.Regions))
+		for i, r := range c.Connection.Regions {
+			regions[i] = r
+		}
+		conn["regions"] = regions
+	}
+
+	return connectionConfigFromMap(conn)
+}
+
+// connectionConfigFromMap converts a key-value map into HCL connection config.
+func connectionConfigFromMap(m map[string]interface{}) string {
+	if len(m) == 0 {
+		return ""
+	}
+	var parts []string
+	for key, val := range m {
+		parts = append(parts, fmt.Sprintf("  %s = %s", key, hclValue(val)))
+	}
+	return strings.Join(parts, "\n")
+}
+
+func hclValue(v interface{}) string {
+	switch val := v.(type) {
+	case string:
+		return fmt.Sprintf("%q", val)
+	case bool:
+		if val {
+			return "true"
+		}
+		return "false"
+	case int:
+		return fmt.Sprintf("%d", val)
+	case int64:
+		return fmt.Sprintf("%d", val)
+	case float64:
+		// YAML unmarshals numbers as float64
+		if val == float64(int64(val)) {
+			return fmt.Sprintf("%d", int64(val))
+		}
+		return fmt.Sprintf("%g", val)
+	case []interface{}:
+		items := make([]string, len(val))
+		for i, item := range val {
+			items[i] = hclValue(item)
+		}
+		return "[" + strings.Join(items, ", ") + "]"
+	case []string:
+		items := make([]string, len(val))
+		for i, s := range val {
+			items[i] = fmt.Sprintf("%q", s)
+		}
+		return "[" + strings.Join(items, ", ") + "]"
+	default:
+		return fmt.Sprintf("%q", fmt.Sprint(val))
+	}
 }
 
 // AccountEntry defines an explicit account to collect from.
@@ -88,8 +281,8 @@ type AccountEntry struct {
 type OrgConfig struct {
 	RoleName       string        `yaml:"role_name"`
 	AdminAccountID string        `yaml:"admin_account_id"`
-	Organizations  []string      `yaml:"organizations"`   // OU IDs to discover accounts from
-	AssumeRoleName string        `yaml:"assume_role_name"` // IAM role name to assume in each account
+	Organizations  []string      `yaml:"organizations"`
+	AssumeRoleName string        `yaml:"assume_role_name"`
 	Overrides      []OrgOverride `yaml:"overrides"`
 }
 
@@ -161,31 +354,31 @@ func LoadAllDrainpipeConfigs(filePaths []string) ([]*DrainpipeConfig, error) {
 	return all, nil
 }
 
-// EffectiveOrg returns the resolved OrgConfig, merging the top-level shorthand
-// fields (organizations, assume_role_name) into the nested org block.
-// Top-level fields act as defaults; the nested org block fields take precedence.
+// EffectiveOrg returns the resolved OrgConfig, merging the shorthand
+// fields (connection.organizations, connection.assume_role_name) into the
+// nested connection.org block. Shorthand fields act as defaults; the nested
+// org block fields take precedence.
 func (c *DrainpipeConfig) EffectiveOrg() *OrgConfig {
 	if c == nil {
 		return nil
 	}
 
-	hasShorthand := len(c.Organizations) > 0 || c.AssumeRoleName != ""
-	if c.Org == nil && !hasShorthand {
+	conn := &c.Connection
+	hasShorthand := len(conn.Organizations) > 0 || conn.AssumeRoleName != ""
+	if conn.Org == nil && !hasShorthand {
 		return nil
 	}
 
-	// Start with a copy of the nested org config (or empty)
 	var result OrgConfig
-	if c.Org != nil {
-		result = *c.Org
+	if conn.Org != nil {
+		result = *conn.Org
 	}
 
-	// Merge top-level shorthand fields as defaults
-	if len(result.Organizations) == 0 && len(c.Organizations) > 0 {
-		result.Organizations = c.Organizations
+	if len(result.Organizations) == 0 && len(conn.Organizations) > 0 {
+		result.Organizations = conn.Organizations
 	}
-	if result.AssumeRoleName == "" && c.AssumeRoleName != "" {
-		result.AssumeRoleName = c.AssumeRoleName
+	if result.AssumeRoleName == "" && conn.AssumeRoleName != "" {
+		result.AssumeRoleName = conn.AssumeRoleName
 	}
 	if result.RoleName == "" && result.AssumeRoleName != "" {
 		result.RoleName = result.AssumeRoleName
@@ -199,11 +392,11 @@ func (c *DrainpipeConfig) EffectiveOrg() *OrgConfig {
 //   - entries: table entries to collect (nil = use default)
 //   - skip: true if the account should be skipped entirely
 func (c *DrainpipeConfig) TablesForAccount(accountID, accountName string) (entries []TableEntry, skip bool) {
-	if c == nil || c.Org == nil {
+	if c == nil || c.Connection.Org == nil {
 		return c.defaultTables(), false
 	}
 
-	for _, override := range c.Org.Overrides {
+	for _, override := range c.Connection.Org.Overrides {
 		if matchesAccount(override.Match, accountID, accountName) {
 			if override.Skip {
 				return nil, true
@@ -227,14 +420,12 @@ func (c *DrainpipeConfig) defaultTables() []TableEntry {
 
 // matchesAccount checks if an override matches the given account.
 func matchesAccount(m OverrideMatch, accountID, accountName string) bool {
-	// Check explicit account IDs
 	for _, id := range m.AccountIDs {
 		if id == accountID {
 			return true
 		}
 	}
 
-	// Check account name patterns (glob)
 	for _, pattern := range m.AccountNames {
 		if ok, _ := path.Match(pattern, accountName); ok {
 			return true

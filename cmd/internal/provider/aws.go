@@ -11,98 +11,32 @@ import (
 	orgtypes "github.com/aws/aws-sdk-go-v2/service/organizations/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	ststypes "github.com/aws/aws-sdk-go-v2/service/sts/types"
-	"github.com/turbot/steampipe-plugin-aws/aws"
-	"github.com/turbot/steampipe-plugin-sdk/v5/grpc/proto"
-	"github.com/turbot/steampipe-plugin-sdk/v5/plugin"
 )
 
-func init() {
-	Register(&AWSProvider{})
-}
-
-// AWSProvider implements the Provider interface for AWS.
-// Fields can be set from a config file; unset fields fall back to env vars.
-type AWSProvider struct {
+// AWSMultiAccount implements MultiAccountProvider for AWS Organizations.
+// It discovers member accounts and assumes IAM roles to obtain credentials.
+// This logic runs in the host process using the AWS SDK directly — it does
+// not depend on the Steampipe plugin.
+type AWSMultiAccount struct {
 	Profile           string   // AWS named profile (fallback: AWS_PROFILE)
 	OrgRoleName       string   // IAM role name for org mode (fallback: AWS_ORG_ROLE_NAME)
 	AssumeRoleName    string   // IAM role name to assume in each account (alias for OrgRoleName)
 	OrgAdminAccountID string   // Admin account to skip (fallback: AWS_ORG_ADMIN_ACCOUNT_ID)
 	Regions           []string // Regions to collect (fallback: AWS_REGIONS)
-	Organizations     []string // OU IDs to discover accounts from (e.g., ou-xxxx-xxxxxxxx)
+	Organizations     []string // OU IDs to discover accounts from
 
-	// Lazily initialized AWS clients (cached for reuse)
 	orgClient *organizations.Client
 	stsClient *sts.Client
 }
 
-func (p *AWSProvider) Name() string { return "aws" }
-
-func (p *AWSProvider) PluginFunc() plugin.PluginFunc { return aws.Plugin }
-
-func (p *AWSProvider) DefaultConnectionConfig() string {
-	var parts []string
-
-	if profile := p.resolveProfile(); profile != "" {
-		parts = append(parts, fmt.Sprintf(`  profile = %q`, profile))
-	}
-	parts = append(parts, regionsHCL(p.resolveRegions())...)
-
-	if len(parts) == 0 {
-		return ""
-	}
-	return strings.Join(parts, "\n")
-}
-
-// ResolveAccount queries aws_sts_caller_identity via the plugin to get the
-// AWS account ID for the current credentials.
-func (p *AWSProvider) ResolveAccount(ctx context.Context, queryFunc QueryFunc) (string, error) {
-	row, err := queryFunc(ctx, "aws_sts_caller_identity")
-	if err != nil {
-		return "", fmt.Errorf("querying STS caller identity: %w", err)
-	}
-	if row == nil {
-		return "", fmt.Errorf("aws_sts_caller_identity returned no data")
-	}
-
-	accountID, ok := row["account_id"]
-	if !ok || accountID == nil {
-		return "", fmt.Errorf("account_id not found in STS caller identity")
-	}
-
-	return fmt.Sprintf("%v", accountID), nil
-}
-
-// NaturalKeyColumns returns the natural key for an AWS table.
-// Prefers "arn" when available — ARNs are globally unique (account+region+resource),
-// while GetCallKeyColumnList keys (e.g., "name") may only be unique within a region,
-// causing duplicate-row errors during multi-region upserts.
-// Falls back to GetCallKeyColumnList keys for tables without an arn column.
-func (p *AWSProvider) NaturalKeyColumns(tableName string, schema *proto.TableSchema) []string {
-	// Prefer arn — globally unique across accounts and regions
-	if schema != nil {
-		for _, col := range schema.Columns {
-			if col.Name == "arn" {
-				return []string{"arn"}
-			}
-		}
-	}
-	// Fall back to GetCallKeyColumnList for tables without arn
-	return DefaultNaturalKeyColumns(schema)
-}
-
-// ---------------------------------------------------------------------------
-// MultiAccountProvider — AWS Organizations support
-// ---------------------------------------------------------------------------
-
 // DiscoverAccounts lists active accounts in an AWS Organization.
-// When Organizations (OU IDs) are configured, it discovers accounts per-OU
-// using ListAccountsForParent. Otherwise, it falls back to listing all accounts.
+// When Organizations (OU IDs) are configured, it discovers accounts per-OU.
+// Otherwise, it falls back to listing all accounts.
 // Returns nil (single-account fallback) when org mode is not configured.
-// Does NOT assume any roles — credentials are obtained lazily via AssumeAccountRole.
-func (p *AWSProvider) DiscoverAccounts(ctx context.Context) ([]AccountInfo, error) {
+func (p *AWSMultiAccount) DiscoverAccounts(ctx context.Context) ([]AccountInfo, error) {
 	roleName := p.resolveAssumeRoleName()
 	if roleName == "" {
-		return nil, nil // single-account mode
+		return nil, nil
 	}
 
 	if err := p.ensureClients(ctx); err != nil {
@@ -118,7 +52,6 @@ func (p *AWSProvider) DiscoverAccounts(ctx context.Context) ([]AccountInfo, erro
 	var err error
 
 	if len(p.Organizations) > 0 {
-		// Discover accounts per-OU
 		for _, ouID := range p.Organizations {
 			ouAccounts, ouErr := listActiveAccountsForParent(ctx, p.orgClient, ouID)
 			if ouErr != nil {
@@ -127,14 +60,12 @@ func (p *AWSProvider) DiscoverAccounts(ctx context.Context) ([]AccountInfo, erro
 			activeAccounts = append(activeAccounts, ouAccounts...)
 		}
 	} else {
-		// Fall back to listing all accounts in the organization
 		activeAccounts, err = listActiveAccounts(ctx, p.orgClient)
 		if err != nil {
 			return nil, fmt.Errorf("listing organization accounts: %w", err)
 		}
 	}
 
-	// Deduplicate accounts (an account could appear in multiple OUs)
 	seen := make(map[string]bool)
 	var accounts []AccountInfo
 	for _, acct := range activeAccounts {
@@ -156,11 +87,8 @@ func (p *AWSProvider) DiscoverAccounts(ctx context.Context) ([]AccountInfo, erro
 	return accounts, nil
 }
 
-// AssumeAccountRole obtains temporary credentials for a specific member account
-// by assuming the configured IAM role via STS. Called just-in-time by workers
-// so credentials are always fresh (1-hour TTL).
-// Leverages sts:TagSession to pass session tags for downstream policy evaluation.
-func (p *AWSProvider) AssumeAccountRole(ctx context.Context, account AccountInfo) (*AccountConfig, error) {
+// AssumeAccountRole obtains temporary credentials for a specific member account.
+func (p *AWSMultiAccount) AssumeAccountRole(ctx context.Context, account AccountInfo) (*AccountConfig, error) {
 	roleName := p.resolveAssumeRoleName()
 
 	if err := p.ensureClients(ctx); err != nil {
@@ -173,21 +101,14 @@ func (p *AWSProvider) AssumeAccountRole(ctx context.Context, account AccountInfo
 		RoleArn:         &roleARN,
 		RoleSessionName: strPtr("drainpipe-" + account.AccountID),
 		Tags: []ststypes.Tag{
-			{
-				Key:   strPtr("DrainpipeAccountId"),
-				Value: strPtr(account.AccountID),
-			},
-			{
-				Key:   strPtr("DrainpipeAccountName"),
-				Value: strPtr(account.AccountName),
-			},
+			{Key: strPtr("DrainpipeAccountId"), Value: strPtr(account.AccountID)},
+			{Key: strPtr("DrainpipeAccountName"), Value: strPtr(account.AccountName)},
 		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("assuming role %s: %w", roleARN, err)
 	}
 
-	// Build HCL connection config with temporary credentials
 	regions := regionsHCL(p.resolveRegions())
 	var configParts []string
 	configParts = append(configParts, fmt.Sprintf("  access_key = %q", *creds.Credentials.AccessKeyId))
@@ -202,8 +123,30 @@ func (p *AWSProvider) AssumeAccountRole(ctx context.Context, account AccountInfo
 	}, nil
 }
 
-// ensureClients lazily initializes the AWS Organizations and STS clients.
-func (p *AWSProvider) ensureClients(ctx context.Context) error {
+// NewAWSMultiAccount creates an AWSMultiAccount from config settings.
+func NewAWSMultiAccount(profile string, regions []string, org *OrgSettings) *AWSMultiAccount {
+	ma := &AWSMultiAccount{
+		Profile: profile,
+		Regions: regions,
+	}
+	if org != nil {
+		ma.OrgRoleName = org.RoleName
+		ma.AssumeRoleName = org.AssumeRoleName
+		ma.OrgAdminAccountID = org.AdminAccountID
+		ma.Organizations = org.Organizations
+	}
+	return ma
+}
+
+// OrgSettings holds org configuration extracted from DrainpipeConfig.
+type OrgSettings struct {
+	RoleName       string
+	AssumeRoleName string
+	AdminAccountID string
+	Organizations  []string
+}
+
+func (p *AWSMultiAccount) ensureClients(ctx context.Context) error {
 	if p.stsClient != nil {
 		return nil
 	}
@@ -222,8 +165,6 @@ func (p *AWSProvider) ensureClients(ctx context.Context) error {
 	return nil
 }
 
-// listActiveAccounts paginates through Organizations ListAccounts and returns
-// only accounts with ACTIVE status.
 func listActiveAccounts(ctx context.Context, client *organizations.Client) ([]orgtypes.Account, error) {
 	var accounts []orgtypes.Account
 	paginator := organizations.NewListAccountsPaginator(client, &organizations.ListAccountsInput{})
@@ -243,12 +184,9 @@ func listActiveAccounts(ctx context.Context, client *organizations.Client) ([]or
 	return accounts, nil
 }
 
-// listActiveAccountsForParent recursively discovers all ACTIVE accounts under
-// a parent OU, including accounts nested in child OUs at any depth.
 func listActiveAccountsForParent(ctx context.Context, client *organizations.Client, parentID string) ([]orgtypes.Account, error) {
 	var accounts []orgtypes.Account
 
-	// 1. Collect direct child accounts of this parent
 	acctPaginator := organizations.NewListAccountsForParentPaginator(client, &organizations.ListAccountsForParentInput{
 		ParentId: &parentID,
 	})
@@ -264,7 +202,6 @@ func listActiveAccountsForParent(ctx context.Context, client *organizations.Clie
 		}
 	}
 
-	// 2. Recurse into child OUs
 	childOUs, err := listChildOUs(ctx, client, parentID)
 	if err != nil {
 		return nil, err
@@ -280,7 +217,6 @@ func listActiveAccountsForParent(ctx context.Context, client *organizations.Clie
 	return accounts, nil
 }
 
-// listChildOUs returns the immediate child OUs of a parent (OU or root).
 func listChildOUs(ctx context.Context, client *organizations.Client, parentID string) ([]orgtypes.OrganizationalUnit, error) {
 	var ous []orgtypes.OrganizationalUnit
 	paginator := organizations.NewListOrganizationalUnitsForParentPaginator(client, &organizations.ListOrganizationalUnitsForParentInput{
@@ -296,16 +232,14 @@ func listChildOUs(ctx context.Context, client *organizations.Client, parentID st
 	return ous, nil
 }
 
-// resolveProfile returns the AWS profile to use: struct field → env var → empty.
-func (p *AWSProvider) resolveProfile() string {
+func (p *AWSMultiAccount) resolveProfile() string {
 	if p.Profile != "" {
 		return p.Profile
 	}
 	return os.Getenv("AWS_PROFILE")
 }
 
-// resolveRegions returns the regions to use: struct field → env var → nil.
-func (p *AWSProvider) resolveRegions() []string {
+func (p *AWSMultiAccount) resolveRegions() []string {
 	if len(p.Regions) > 0 {
 		return p.Regions
 	}
@@ -319,7 +253,6 @@ func (p *AWSProvider) resolveRegions() []string {
 	return nil
 }
 
-// regionsHCL formats a region list into HCL config lines.
 func regionsHCL(regions []string) []string {
 	if len(regions) == 0 {
 		return nil
@@ -331,8 +264,7 @@ func regionsHCL(regions []string) []string {
 	return []string{fmt.Sprintf("  regions = [%s]", strings.Join(quoted, ", "))}
 }
 
-// resolveAssumeRoleName returns the IAM role name to assume: AssumeRoleName → OrgRoleName → env var → empty.
-func (p *AWSProvider) resolveAssumeRoleName() string {
+func (p *AWSMultiAccount) resolveAssumeRoleName() string {
 	if p.AssumeRoleName != "" {
 		return p.AssumeRoleName
 	}

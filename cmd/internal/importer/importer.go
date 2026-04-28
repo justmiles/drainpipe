@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -14,6 +15,8 @@ import (
 	"github.com/justmiles/drainpipe/cmd/internal/exporter"
 	"github.com/justmiles/drainpipe/cmd/internal/schema"
 )
+
+var arnAccountRe = regexp.MustCompile(`^arn:[^:]+:[^:]+:[^:]*:(\d{12}):`)
 
 // Importer handles the staging table import pattern for loading data into PostgreSQL.
 type Importer struct {
@@ -76,13 +79,20 @@ func (imp *Importer) Import(ctx context.Context, pgTable string, naturalKeys []s
 	}
 	log.Info().Int64("upserted", upserted).Msg("upsert complete")
 
-	// Step 4: Soft-delete resources not in staging (scoped to _source_account)
-	deleted, err := imp.softDelete(ctx, tx, stagingTable, pgTable, naturalKeys)
-	if err != nil {
-		return nil, fmt.Errorf("soft-deleting: %w", err)
-	}
-	if deleted > 0 {
-		log.Info().Int64("deleted", deleted).Msg("soft-deletes applied")
+	// Step 4: Soft-delete resources not in staging (scoped to _source_account).
+	// Skip if staging was empty — an empty export is not proof of deletion;
+	// it usually means a transient API failure or credentials issue.
+	var deleted int64
+	if rowCount > 0 {
+		deleted, err = imp.softDelete(ctx, tx, stagingTable, pgTable, naturalKeys)
+		if err != nil {
+			return nil, fmt.Errorf("soft-deleting: %w", err)
+		}
+		if deleted > 0 {
+			log.Info().Int64("deleted", deleted).Msg("soft-deletes applied")
+		}
+	} else {
+		log.Warn().Msg("staging table empty, skipping soft-deletes")
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -119,73 +129,73 @@ func (imp *Importer) createStagingTable(ctx context.Context, tx pgx.Tx, stagingT
 	return nil
 }
 
-// loadStaging inserts rows into the staging table.
+// loadStaging streams rows into the staging table using the PostgreSQL COPY
+// protocol (via pgx.CopyFrom). This avoids building large SQL statements and
+// keeps memory usage proportional to a single row regardless of table size.
+//
+// Cross-account resources are filtered: if a row's ARN contains an account ID
+// that differs from sourceAccount, it's skipped. The owning account will
+// collect it as its own, avoiding duplicate rows from shared/peered resources.
 func (imp *Importer) loadStaging(ctx context.Context, tx pgx.Tx, stagingTable string, columns []string, rows <-chan exporter.Row) (int64, error) {
-	var count int64
-	var batch [][]interface{}
-	const batchSize = 500
-
-	for row := range rows {
-		values := make([]interface{}, len(columns))
-		for i, col := range columns {
-			val := row[col]
-			if val != nil {
-				switch v := val.(type) {
-				case map[string]interface{}, []interface{}:
-					b, _ := json.Marshal(v)
-					values[i] = string(b)
-				default:
-					values[i] = v
+	var skipped int64
+	count, err := tx.CopyFrom(ctx,
+		pgx.Identifier{stagingTable},
+		columns,
+		pgx.CopyFromFunc(func() ([]interface{}, error) {
+			for {
+				row, ok := <-rows
+				if !ok {
+					return nil, nil
 				}
+				if imp.isCrossAccount(row) {
+					skipped++
+					continue
+				}
+				return rowToValues(row, columns), nil
 			}
-		}
-		batch = append(batch, values)
-		count++
-
-		if len(batch) >= batchSize {
-			if err := imp.insertBatch(ctx, tx, stagingTable, columns, batch); err != nil {
-				return count, err
-			}
-			batch = batch[:0]
-		}
+		}),
+	)
+	if skipped > 0 {
+		imp.logger.Debug().Int64("skipped", skipped).Msg("filtered cross-account resources")
 	}
-
-	if len(batch) > 0 {
-		if err := imp.insertBatch(ctx, tx, stagingTable, columns, batch); err != nil {
-			return count, err
-		}
-	}
-
-	return count, nil
+	return count, err
 }
 
-func (imp *Importer) insertBatch(ctx context.Context, tx pgx.Tx, table string, columns []string, rows [][]interface{}) error {
-	if len(rows) == 0 {
-		return nil
+// isCrossAccount checks if a row's ARN belongs to a different account than
+// the one being collected. Returns false (keep the row) if there's no ARN
+// or no sourceAccount to compare against.
+func (imp *Importer) isCrossAccount(row exporter.Row) bool {
+	if imp.sourceAccount == "" {
+		return false
 	}
+	arn, _ := row["arn"].(string)
+	if arn == "" {
+		return false
+	}
+	m := arnAccountRe.FindStringSubmatch(arn)
+	if m == nil {
+		return false
+	}
+	return m[1] != imp.sourceAccount
+}
 
-	numCols := len(columns)
-	var valuePlaceholders []string
-	var allArgs []interface{}
-
-	for i, row := range rows {
-		var placeholders []string
-		for j := range row {
-			placeholders = append(placeholders, fmt.Sprintf("$%d", i*numCols+j+1))
+// rowToValues converts an exporter.Row map into an ordered slice of values
+// matching the given column list. JSON/array values are marshaled to strings.
+func rowToValues(row exporter.Row, columns []string) []interface{} {
+	values := make([]interface{}, len(columns))
+	for i, col := range columns {
+		val := row[col]
+		if val != nil {
+			switch v := val.(type) {
+			case map[string]interface{}, []interface{}:
+				b, _ := json.Marshal(v)
+				values[i] = string(b)
+			default:
+				values[i] = v
+			}
 		}
-		valuePlaceholders = append(valuePlaceholders, "("+strings.Join(placeholders, ", ")+")")
-		allArgs = append(allArgs, row...)
 	}
-
-	sql := fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES %s",
-		table,
-		strings.Join(columns, ", "),
-		strings.Join(valuePlaceholders, ", "),
-	)
-
-	_, err := tx.Exec(ctx, sql, allArgs...)
-	return err
+	return values
 }
 
 // upsert merges staging rows into the live table, scoped to _source_account.

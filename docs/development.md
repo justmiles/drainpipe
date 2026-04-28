@@ -4,7 +4,7 @@
 
 - **Go 1.25+** (via [devbox](https://www.jetify.com/devbox) or system install)
 - **Docker** (for PostgreSQL)
-- **AWS credentials** configured (`~/.aws/config` or environment)
+- **Steampipe plugin binaries** (downloaded automatically or installed via `steampipe plugin install`)
 
 ## Devbox Setup
 
@@ -20,7 +20,7 @@ devbox shell
 devbox run build
 ```
 
-This compiles the Go binary to `./bin/drainpipe`.
+This compiles the Go binary to `./bin/drainpipe`. The binary is a **thin host** — it does not embed any Steampipe plugins. Plugins are loaded as separate processes at runtime.
 
 ## Development Stack
 
@@ -46,6 +46,22 @@ devbox run drain
 AWS_PROFILE=my-profile AWS_REGIONS=us-east-1 ./bin/drainpipe drain
 ```
 
+### Plugin Binaries
+
+Drainpipe needs Steampipe plugin binaries at runtime. They are resolved in this order:
+
+1. **Drainpipe cache** — `~/.drainpipe/plugins/<org>/<name>/<version>/`
+2. **Steampipe install** — `~/.steampipe/plugins/hub.steampipe.io/plugins/<org>/<name>@<version>/`
+3. **GitHub download** — Automatic download from GitHub Releases (requires explicit version, not `latest`)
+4. **Explicit path** — Set `plugin_path:` in config
+
+For development, the easiest way to get plugin binaries is via Steampipe:
+
+```bash
+steampipe plugin install aws
+steampipe plugin install cloudflare
+```
+
 ## Testing
 
 ```bash
@@ -54,19 +70,6 @@ devbox run test:unit
 
 # Integration tests (requires Docker Compose stack)
 devbox run test:integration
-```
-
-## Docker Image
-
-Build and run Drainpipe as a Docker container:
-
-```bash
-docker build -t drainpipe .
-
-docker run --rm \
-  -e DB_HOST=host.docker.internal \
-  -e AWS_PROFILE=my-profile \
-  drainpipe drain
 ```
 
 ## Project Structure
@@ -78,13 +81,14 @@ drainpipe/
 │   ├── internal/
 │   │   ├── config/
 │   │   │   ├── config.go               # Database config from env
-│   │   │   └── drainpipe.go            # YAML config loader
-│   │   ├── exporter/exporter.go         # Steampipe plugin wrapper
+│   │   │   └── collector.go            # YAML config loader + known provider defaults
+│   │   ├── exporter/exporter.go         # Out-of-process plugin gRPC client
 │   │   ├── importer/importer.go         # Staging-table import pattern
 │   │   ├── match/match.go              # Glob table matching
+│   │   ├── pluginmanager/manager.go     # Plugin binary download/cache/resolution
 │   │   ├── provider/
-│   │   │   ├── provider.go             # Provider interface + registry
-│   │   │   └── aws.go                  # AWS provider + org + SSO support
+│   │   │   ├── provider.go             # Natural key helpers + multi-account interface
+│   │   │   └── aws.go                  # AWS Organizations discovery + STS role assumption
 │   │   └── schema/schema.go            # Dynamic PG schema management
 │   ├── go.mod
 │   └── go.sum
@@ -96,3 +100,39 @@ drainpipe/
 ├── LICENSE                              # AGPL-3.0
 └── README.md
 ```
+
+## Adding a New Provider
+
+Adding support for a new Steampipe plugin requires **zero Go code**. Create a config block:
+
+```yaml
+plugin: turbot/gcp@0.45.0
+connection:
+  project: my-gcp-project
+  credentials: "/path/to/credentials.json"
+identity_table: gcp_project
+identity_column: project_id
+natural_key: self_link
+tables:
+  - "gcp_compute_*"
+```
+
+If the plugin binary is not already installed, Drainpipe will attempt to download it from GitHub Releases.
+
+To add a new **known provider shorthand** (so users can write `provider: gcp` instead of the full plugin block), add an entry to `KnownProviders` in `cmd/internal/config/collector.go`:
+
+```go
+var KnownProviders = map[string]ProviderDefaults{
+    // ...existing entries...
+    "gcp": {
+        Plugin:         "turbot/gcp@latest",
+        IdentityTable:  "gcp_project",
+        IdentityColumn: "project_id",
+        NaturalKey:     "self_link",
+    },
+}
+```
+
+## Architecture
+
+See [architecture.md](architecture.md) for details on the out-of-process plugin model, gRPC communication, and data flow.

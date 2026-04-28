@@ -3,42 +3,86 @@ package exporter
 import (
 	"context"
 	"fmt"
+	"io"
+	"os/exec"
+	"sync"
+	"time"
 
+	"github.com/hashicorp/go-hclog"
+	goplugin "github.com/hashicorp/go-plugin"
 	"github.com/rs/zerolog"
-	"github.com/turbot/steampipe-plugin-sdk/v5/anywhere"
 	"github.com/turbot/steampipe-plugin-sdk/v5/grpc"
 	"github.com/turbot/steampipe-plugin-sdk/v5/grpc/proto"
-	"github.com/turbot/steampipe-plugin-sdk/v5/plugin"
+	pluginshared "github.com/turbot/steampipe-plugin-sdk/v5/grpc/shared"
 )
 
-// Exporter wraps a Steampipe plugin server for in-process execution.
-// It is provider-agnostic — the plugin function and alias are passed in.
+// Exporter wraps a Steampipe plugin for table export, communicating via gRPC
+// to an out-of-process plugin binary.
 type Exporter struct {
-	server         *grpc.PluginServer
+	pluginClient   *grpc.PluginClient
+	goPluginClient *goplugin.Client
 	pluginAlias    string
+	pluginName     string
+	binaryPath     string
 	connectionName string
+	configHCL      string
 	logger         zerolog.Logger
+	mu             sync.Mutex
+
+	schemaOnce  sync.Once
+	schemaCache map[string]*proto.TableSchema
+	schemaErr   error
 }
 
-// New creates a new Exporter for the given provider.
+// New launches a Steampipe plugin binary as a child process and connects
+// via gRPC using the hashicorp/go-plugin protocol.
 //   - pluginAlias: short name (e.g., "aws", "azure", "cloudflare")
-//   - pluginFunc: the Steampipe plugin constructor
-func New(pluginAlias string, pluginFunc plugin.PluginFunc, logger zerolog.Logger) *Exporter {
-	server := plugin.Server(&plugin.ServeOpts{
-		PluginFunc: pluginFunc,
+//   - pluginName: go-plugin Dispense name (e.g., "steampipe-plugin-aws")
+//   - binaryPath: filesystem path to the plugin binary
+func New(pluginAlias, pluginName, binaryPath string, logger zerolog.Logger) (*Exporter, error) {
+	pluginMap := map[string]goplugin.Plugin{
+		pluginName: &pluginshared.WrapperPlugin{},
+	}
+
+	goPluginClient := goplugin.NewClient(&goplugin.ClientConfig{
+		HandshakeConfig:  pluginshared.Handshake,
+		Plugins:          pluginMap,
+		Cmd:              exec.Command(binaryPath),
+		AllowedProtocols: []goplugin.Protocol{goplugin.ProtocolGRPC},
+		Logger:           hclog.NewNullLogger(),
 	})
 
+	pluginClient, err := grpc.NewPluginClient(goPluginClient, pluginName)
+	if err != nil {
+		goPluginClient.Kill()
+		return nil, fmt.Errorf("connecting to plugin %s: %w", pluginName, err)
+	}
+
 	return &Exporter{
-		server:         server,
+		pluginClient:   pluginClient,
+		goPluginClient: goPluginClient,
 		pluginAlias:    pluginAlias,
-		connectionName: pluginAlias, // connection name defaults to alias
+		pluginName:     pluginName,
+		binaryPath:     binaryPath,
+		connectionName: pluginAlias,
 		logger:         logger,
+	}, nil
+}
+
+// Close terminates the plugin child process.
+func (e *Exporter) Close() {
+	if e.goPluginClient != nil {
+		e.goPluginClient.Kill()
 	}
 }
 
 // SetConnectionConfig configures the plugin with provider-specific credentials.
 // configHCL is the HCL connection config body (can be empty for default creds).
 func (e *Exporter) SetConnectionConfig(configHCL string) error {
+	e.mu.Lock()
+	e.configHCL = configHCL
+	e.mu.Unlock()
+
 	connectionConfig := &proto.ConnectionConfig{
 		Connection:      e.connectionName,
 		Plugin:          e.pluginAlias,
@@ -49,16 +93,15 @@ func (e *Exporter) SetConnectionConfig(configHCL string) error {
 
 	req := &proto.SetAllConnectionConfigsRequest{
 		Configs:        []*proto.ConnectionConfig{connectionConfig},
-		MaxCacheSizeMb: -1,
+		MaxCacheSizeMb: 50,
 	}
 
-	_, err := e.server.SetAllConnectionConfigs(req)
+	_, err := e.pluginClient.SetAllConnectionConfigs(req)
 	if err != nil {
 		return fmt.Errorf("setting connection config: %w", err)
 	}
 
-	// Disable cache — we're doing batch exports, not interactive queries
-	_, err = e.server.SetCacheOptions(&proto.SetCacheOptionsRequest{Enabled: false})
+	_, err = e.pluginClient.SetCacheOptions(&proto.SetCacheOptionsRequest{Enabled: false})
 	if err != nil {
 		return fmt.Errorf("disabling cache: %w", err)
 	}
@@ -67,17 +110,55 @@ func (e *Exporter) SetConnectionConfig(configHCL string) error {
 	return nil
 }
 
-// GetSchema returns the schema for the given table.
-func (e *Exporter) GetSchema(tableName string) (*proto.TableSchema, error) {
-	req := &proto.GetSchemaRequest{
-		Connection: e.connectionName,
-	}
-	resp, err := e.server.GetSchema(req)
-	if err != nil {
-		return nil, fmt.Errorf("getting schema: %w", err)
+// SetRateLimiters sends rate limiter definitions to the plugin via gRPC.
+// Call after SetConnectionConfig. Definitions override any plugin-compiled
+// limiters with the same name.
+func (e *Exporter) SetRateLimiters(defs []*proto.RateLimiterDefinition) error {
+	if len(defs) == 0 {
+		return nil
 	}
 
-	tableSchema, ok := resp.Schema.Schema[tableName]
+	req := &proto.SetRateLimitersRequest{
+		Definitions: defs,
+	}
+	_, err := e.pluginClient.SetRateLimiters(req)
+	if err != nil {
+		return fmt.Errorf("setting rate limiters: %w", err)
+	}
+
+	e.logger.Info().Int("limiters", len(defs)).Msg("rate limiters configured")
+	return nil
+}
+
+// fetchSchemaOnce fetches the full plugin schema exactly once and caches it.
+func (e *Exporter) fetchSchemaOnce() (map[string]*proto.TableSchema, error) {
+	e.schemaOnce.Do(func() {
+		schema, err := e.pluginClient.GetSchema(e.connectionName)
+		if err != nil {
+			e.schemaErr = fmt.Errorf("getting schema: %w", err)
+			return
+		}
+		e.schemaCache = schema.Schema
+	})
+	return e.schemaCache, e.schemaErr
+}
+
+// resetSchemaCache clears the cached schema so the next call re-fetches it.
+// Called after Reconnect to pick up the new plugin process.
+func (e *Exporter) resetSchemaCache() {
+	e.schemaOnce = sync.Once{}
+	e.schemaCache = nil
+	e.schemaErr = nil
+}
+
+// GetSchema returns the schema for the given table.
+func (e *Exporter) GetSchema(tableName string) (*proto.TableSchema, error) {
+	schemas, err := e.fetchSchemaOnce()
+	if err != nil {
+		return nil, err
+	}
+
+	tableSchema, ok := schemas[tableName]
 	if !ok {
 		return nil, fmt.Errorf("table %q not found in plugin schema", tableName)
 	}
@@ -86,43 +167,34 @@ func (e *Exporter) GetSchema(tableName string) (*proto.TableSchema, error) {
 
 // ListTables returns the names of all tables available in the plugin.
 func (e *Exporter) ListTables() ([]string, error) {
-	req := &proto.GetSchemaRequest{
-		Connection: e.connectionName,
-	}
-	resp, err := e.server.GetSchema(req)
+	schemas, err := e.fetchSchemaOnce()
 	if err != nil {
-		return nil, fmt.Errorf("getting schema: %w", err)
+		return nil, err
 	}
 
-	names := make([]string, 0, len(resp.Schema.Schema))
-	for name := range resp.Schema.Schema {
+	names := make([]string, 0, len(schemas))
+	for name := range schemas {
 		names = append(names, name)
 	}
 	return names, nil
 }
 
 // GetAllSchemas returns the full schema map for all tables in a single call.
-// Use this when you need schemas for many tables to avoid repeated GetSchema calls.
 func (e *Exporter) GetAllSchemas() (map[string]*proto.TableSchema, error) {
-	req := &proto.GetSchemaRequest{
-		Connection: e.connectionName,
-	}
-	resp, err := e.server.GetSchema(req)
-	if err != nil {
-		return nil, fmt.Errorf("getting schema: %w", err)
-	}
-	return resp.Schema.Schema, nil
+	return e.fetchSchemaOnce()
 }
 
 // QueryOneRow exports a table and returns just the first row.
 // Useful for identity/metadata tables like aws_sts_caller_identity.
 func (e *Exporter) QueryOneRow(ctx context.Context, tableName string) (Row, error) {
-	rowCh, errCh := e.Export(ctx, tableName, nil)
+	tableSchema, err := e.GetSchema(tableName)
+	if err != nil {
+		return nil, fmt.Errorf("getting schema for %s: %w", tableName, err)
+	}
+	rowCh, errCh := e.Export(ctx, tableName, tableSchema.GetColumnNames(), nil)
 
-	// Take the first row
 	row, ok := <-rowCh
 	if !ok {
-		// Channel closed with no rows — check for error
 		select {
 		case err := <-errCh:
 			if err != nil {
@@ -133,7 +205,6 @@ func (e *Exporter) QueryOneRow(ctx context.Context, tableName string) (Row, erro
 		return nil, nil
 	}
 
-	// Drain remaining rows (we only want one)
 	go func() {
 		for range rowCh {
 		}
@@ -146,9 +217,10 @@ func (e *Exporter) QueryOneRow(ctx context.Context, tableName string) (Row, erro
 type Row map[string]interface{}
 
 // Export executes a table export with optional server-side filtering.
+// columns is the list of column names to export (from the table schema).
 // The where map specifies key column → value filters (e.g. {"status": "ACTIVE"}).
 // Pass nil for no filtering. The channel is closed when the export completes.
-func (e *Exporter) Export(ctx context.Context, tableName string, where map[string]string) (<-chan Row, <-chan error) {
+func (e *Exporter) Export(ctx context.Context, tableName string, columns []string, where map[string]string) (<-chan Row, <-chan error) {
 	rowCh := make(chan Row, 256)
 	errCh := make(chan error, 1)
 
@@ -156,18 +228,7 @@ func (e *Exporter) Export(ctx context.Context, tableName string, where map[strin
 		defer close(rowCh)
 		defer close(errCh)
 
-		// Get schema to know all columns
-		schema, err := e.GetSchema(tableName)
-		if err != nil {
-			errCh <- err
-			return
-		}
-
-		columns := schema.GetColumnNames()
-
-		// Build quals from the where map
 		quals := buildQuals(where)
-
 		queryContext := proto.NewQueryContext(columns, quals, -1, nil)
 		req := &proto.ExecuteRequest{
 			Table:        tableName,
@@ -182,25 +243,30 @@ func (e *Exporter) Export(ctx context.Context, tableName string, where map[strin
 			},
 		}
 
-		stream := anywhere.NewLocalPluginStream(ctx)
-		e.server.CallExecuteAsync(req, stream)
-
-		// Wait for stream to be ready
-		select {
-		case <-stream.Ready():
-		case <-ctx.Done():
-			errCh <- ctx.Err()
+		stream, _, cancel, err := e.pluginClient.Execute(req)
+		if err != nil {
+			errCh <- fmt.Errorf("starting execute: %w", err)
 			return
 		}
+
+		// Cancel the gRPC stream when the caller's context is done
+		go func() {
+			<-ctx.Done()
+			cancel()
+		}()
 
 		for {
 			response, err := stream.Recv()
 			if err != nil {
+				if err == io.EOF {
+					return
+				}
+				if ctx.Err() != nil {
+					errCh <- ctx.Err()
+					return
+				}
 				errCh <- fmt.Errorf("receiving row: %w", err)
 				return
-			}
-			if response == nil {
-				return // stream complete
 			}
 
 			row := convertRow(response.Row)
@@ -208,12 +274,84 @@ func (e *Exporter) Export(ctx context.Context, tableName string, where map[strin
 			case rowCh <- row:
 			case <-ctx.Done():
 				errCh <- ctx.Err()
+				cancel()
 				return
 			}
 		}
 	}()
 
 	return rowCh, errCh
+}
+
+// Exited returns whether the plugin process has terminated.
+func (e *Exporter) Exited() bool {
+	return e.goPluginClient.Exited()
+}
+
+// Reconnect kills the old plugin process and launches a fresh one with
+// the same configuration. Safe to call from multiple goroutines; only
+// one reconnect runs at a time.
+func (e *Exporter) Reconnect() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.goPluginClient != nil && !e.goPluginClient.Exited() {
+		e.goPluginClient.Kill()
+	}
+
+	pluginMap := map[string]goplugin.Plugin{
+		e.pluginName: &pluginshared.WrapperPlugin{},
+	}
+
+	e.goPluginClient = goplugin.NewClient(&goplugin.ClientConfig{
+		HandshakeConfig:  pluginshared.Handshake,
+		Plugins:          pluginMap,
+		Cmd:              exec.Command(e.binaryPath),
+		AllowedProtocols: []goplugin.Protocol{goplugin.ProtocolGRPC},
+		Logger:           hclog.NewNullLogger(),
+	})
+
+	pluginClient, err := grpc.NewPluginClient(e.goPluginClient, e.pluginName)
+	if err != nil {
+		e.goPluginClient.Kill()
+		return fmt.Errorf("reconnecting to plugin %s: %w", e.pluginName, err)
+	}
+	e.pluginClient = pluginClient
+	e.resetSchemaCache()
+
+	if e.configHCL != "" || e.pluginAlias != "" {
+		if err := e.setConnectionConfigLocked(); err != nil {
+			return fmt.Errorf("reconfiguring after reconnect: %w", err)
+		}
+	}
+
+	e.logger.Info().Msg("plugin process reconnected")
+	return nil
+}
+
+func (e *Exporter) setConnectionConfigLocked() error {
+	connectionConfig := &proto.ConnectionConfig{
+		Connection:      e.connectionName,
+		Plugin:          e.pluginAlias,
+		PluginShortName: e.pluginAlias,
+		Config:          e.configHCL,
+		PluginInstance:  e.pluginAlias,
+	}
+
+	req := &proto.SetAllConnectionConfigsRequest{
+		Configs:        []*proto.ConnectionConfig{connectionConfig},
+		MaxCacheSizeMb: 50,
+	}
+
+	if _, err := e.pluginClient.SetAllConnectionConfigs(req); err != nil {
+		return fmt.Errorf("setting connection config: %w", err)
+	}
+
+	if _, err := e.pluginClient.SetCacheOptions(&proto.SetCacheOptionsRequest{Enabled: false}); err != nil {
+		return fmt.Errorf("disabling cache: %w", err)
+	}
+
+	return nil
 }
 
 // buildQuals converts a simple map[string]string into the proto.Quals map
@@ -273,4 +411,21 @@ func columnToInterface(col *proto.Column) interface{} {
 	default:
 		return nil
 	}
+}
+
+// WaitForPlugin waits up to the given timeout for the plugin to be ready
+// by polling GetSchema.
+func (e *Exporter) WaitForPlugin(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		_, err := e.pluginClient.GetSchema(e.connectionName)
+		if err == nil {
+			return nil
+		}
+		if e.goPluginClient.Exited() {
+			return fmt.Errorf("plugin process exited unexpectedly")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("plugin did not become ready within %s", timeout)
 }

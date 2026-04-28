@@ -93,7 +93,16 @@ func (m *Manager) EnsureTable(ctx context.Context, pgTable string, pluginSchema 
 
 	if added > 0 {
 		log.Info().Int("columns_added", added).Msg("table updated")
-	} else {
+	}
+
+	// Reconcile PK if the desired natural keys differ from the existing PK.
+	if len(naturalKeys) > 0 {
+		if err := m.reconcilePK(ctx, pgTable, naturalKeys, log); err != nil {
+			return fmt.Errorf("reconciling primary key: %w", err)
+		}
+	}
+
+	if added == 0 {
 		log.Debug().Msg("table schema up to date")
 	}
 
@@ -168,6 +177,84 @@ func (m *Manager) addColumn(ctx context.Context, pgTable string, col ColumnDef) 
 	sql := fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s", pgTable, col.Name, col.PGType)
 	_, err := m.pool.Exec(ctx, sql)
 	return err
+}
+
+// reconcilePK checks whether the existing PK matches the desired natural keys
+// and alters it if not. This handles tables created with stale key resolution.
+func (m *Manager) reconcilePK(ctx context.Context, pgTable string, naturalKeys []string, log zerolog.Logger) error {
+	existing, conname, err := m.existingPKColumns(ctx, pgTable)
+	if err != nil {
+		return err
+	}
+
+	desired := append([]string{"_source_account"}, naturalKeys...)
+
+	if slicesEqual(existing, desired) {
+		return nil
+	}
+
+	log.Info().
+		Strs("old_pk", existing).
+		Strs("new_pk", desired).
+		Msg("primary key mismatch, altering")
+
+	if conname != "" {
+		dropSQL := fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", pgTable, conname)
+		if _, err := m.pool.Exec(ctx, dropSQL); err != nil {
+			return fmt.Errorf("dropping old PK: %w", err)
+		}
+	}
+
+	pkList := strings.Join(desired, ", ")
+	addSQL := fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)", pgTable, pkList)
+	if _, err := m.pool.Exec(ctx, addSQL); err != nil {
+		return fmt.Errorf("adding new PK (%s): %w", pkList, err)
+	}
+
+	return nil
+}
+
+// existingPKColumns returns the column names in the existing PK (in ordinal
+// order) and the constraint name, or nil/"" if no PK exists.
+func (m *Manager) existingPKColumns(ctx context.Context, pgTable string) ([]string, string, error) {
+	rows, err := m.pool.Query(ctx, `
+		SELECT a.attname, c.conname
+		FROM pg_constraint c
+		JOIN pg_class t ON c.conrelid = t.oid
+		JOIN pg_namespace n ON t.relnamespace = n.oid
+		JOIN unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
+		JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+		WHERE n.nspname = 'public' AND t.relname = $1 AND c.contype = 'p'
+		ORDER BY k.ord
+	`, pgTable)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+
+	var cols []string
+	var conname string
+	for rows.Next() {
+		var col, cn string
+		if err := rows.Scan(&col, &cn); err != nil {
+			return nil, "", err
+		}
+		cols = append(cols, col)
+		conname = cn
+	}
+	return cols, conname, rows.Err()
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func schemaToColumns(s *proto.TableSchema) []ColumnDef {

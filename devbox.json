@@ -4,7 +4,10 @@
     "go@1.26",
     "gcc@14.2.0",
     "powerpipe@latest",
-    "steampipe@2.3.6"
+    "cloudflared@latest",
+    "postgresql@latest",
+    "steampipe@latest",
+    "pgweb@latest"
   ],
   "shell": {
     "init_hook": [
@@ -20,8 +23,8 @@
       "build": [
         "cd cmd && go build -o ../bin/drainpipe ."
       ],
-      "docker": [
-        "docker build -f cmd/Dockerfile -t drainpipe ."
+      "docker:publish": [
+        "docker build . -f Dockerfile -t justmiles/drainpipe:latest && docker push justmiles/drainpipe:latest"
       ],
       "drain": [
         "cd cmd && go run . drain --tables aws_account,aws_ec2_instance,aws_s3_bucket"
@@ -34,6 +37,9 @@
       ],
       "test:integration": [
         "cd cmd && echo '=== Building test binaries ===' && CGO_ENABLED=0 go test -c -tags=integration -o /tmp/_test_schema ./internal/schema/ && CGO_ENABLED=0 go test -c -tags=integration -o /tmp/_test_importer ./internal/importer/ && echo '=== Running inside Docker network ===' && docker run -d --name _test_runner --network resource-inventory_default -e TEST_DATABASE_URL='postgres://cmdb:cmdb_dev@postgres:5432/cmdb?sslmode=disable' alpine:latest sleep 120 > /dev/null && docker cp /tmp/_test_schema _test_runner:/test_schema && docker cp /tmp/_test_importer _test_runner:/test_importer && docker exec _test_runner chmod +x /test_schema /test_importer && echo '--- schema ---' && docker exec _test_runner /test_schema -test.v -test.run Integration -test.count=1 && echo '--- importer ---' && docker exec _test_runner /test_importer -test.v -test.run Integration -test.count=1; EXIT=$?; docker rm -f _test_runner > /dev/null 2>&1; rm -f /tmp/_test_schema /tmp/_test_importer; exit $EXIT"
+      ],
+      "pgweb": [
+        "pgweb --bind 0.0.0.0 --listen 25578"
       ]
     }
   }
