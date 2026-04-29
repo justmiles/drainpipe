@@ -132,6 +132,20 @@ type HCLResult struct {
 
 // ── Loader ──────────────────────────────────────────────────────────
 
+// envEvalContext builds an hcl.EvalContext with all current environment
+// variables available as top-level HCL variables. This allows HCL template
+// interpolation like ${MY_VAR} to resolve to the corresponding env value.
+func envEvalContext() *hcl.EvalContext {
+	vars := make(map[string]cty.Value)
+	for _, pair := range os.Environ() {
+		k, v, ok := strings.Cut(pair, "=")
+		if ok {
+			vars[k] = cty.StringVal(v)
+		}
+	}
+	return &hcl.EvalContext{Variables: vars}
+}
+
 func LoadHCLConfig(filePath string) (*HCLResult, error) {
 	src, err := os.ReadFile(filePath)
 	if err != nil {
@@ -147,16 +161,18 @@ func LoadHCLConfig(filePath string) (*HCLResult, error) {
 		return nil, fmt.Errorf("parsing HCL %s: %s", filePath, diags.Error())
 	}
 
+	ctx := envEvalContext()
+
 	var hclFile HCLFile
-	diags = gohcl.DecodeBody(file.Body, nil, &hclFile)
+	diags = gohcl.DecodeBody(file.Body, ctx, &hclFile)
 	if diags.HasErrors() {
 		return nil, fmt.Errorf("decoding HCL %s: %s", filePath, diags.Error())
 	}
 
-	return convertHCL(&hclFile, file)
+	return convertHCL(&hclFile, file, ctx)
 }
 
-func convertHCL(hclFile *HCLFile, file *hcl.File) (*HCLResult, error) {
+func convertHCL(hclFile *HCLFile, file *hcl.File, ctx *hcl.EvalContext) (*HCLResult, error) {
 	connMap := make(map[string]*HCLConnection, len(hclFile.Connections))
 	for i := range hclFile.Connections {
 		connMap[hclFile.Connections[i].Name] = &hclFile.Connections[i]
@@ -190,7 +206,7 @@ func convertHCL(hclFile *HCLFile, file *hcl.File) (*HCLResult, error) {
 			cfg.Plugin = conn.Plugin
 			cfg.Provider = inferProvider(conn.Plugin)
 
-			connExtra, err := decodeConnectionRemain(conn.Remain, file)
+			connExtra, err := decodeConnectionRemain(conn.Remain, file, ctx)
 			if err != nil {
 				return nil, fmt.Errorf("connection %q: %w", conn.Name, err)
 			}
@@ -309,7 +325,7 @@ var connectionTypedFields = map[string]bool{
 // the connection block's HCL body remainder (everything except typed fields).
 // The hclsyntax Remain body shares the parent's attribute map, so we
 // must explicitly skip fields already decoded into HCLConnection.
-func decodeConnectionRemain(body hcl.Body, file *hcl.File) (map[string]interface{}, error) {
+func decodeConnectionRemain(body hcl.Body, file *hcl.File, ctx *hcl.EvalContext) (map[string]interface{}, error) {
 	if body == nil {
 		return nil, nil
 	}
@@ -325,7 +341,7 @@ func decodeConnectionRemain(body hcl.Body, file *hcl.File) (map[string]interface
 			continue
 		}
 
-		val, diags := attr.Expr.Value(nil)
+		val, diags := attr.Expr.Value(ctx)
 		if diags.HasErrors() {
 			return nil, fmt.Errorf("evaluating %q: %s", name, diags.Error())
 		}

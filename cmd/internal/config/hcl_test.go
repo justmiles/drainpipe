@@ -494,6 +494,87 @@ drainpipe "test" {
 	}
 }
 
+func TestLoadHCLConfig_EnvVarExpansion(t *testing.T) {
+	t.Setenv("DRAINPIPE_TEST_TENANT", "my-tenant-id")
+	t.Setenv("DRAINPIPE_TEST_CLIENT", "my-client-id")
+	t.Setenv("DRAINPIPE_TEST_SECRET", "s3cret!")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.hcl")
+	data := []byte(`
+connection "azure" {
+  plugin        = "turbot/azure@latest"
+  tenant_id     = "${DRAINPIPE_TEST_TENANT}"
+  client_id     = "${DRAINPIPE_TEST_CLIENT}"
+  client_secret = "${DRAINPIPE_TEST_SECRET}"
+}
+
+drainpipe "test" {
+  connection = "azure"
+  tables     = ["azure_subscription"]
+}
+`)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := LoadHCLConfig(path)
+	if err != nil {
+		t.Fatalf("LoadHCLConfig() error = %v", err)
+	}
+	cfg := result.Configs[0]
+
+	if cfg.Connection.Extra["tenant_id"] != "my-tenant-id" {
+		t.Errorf("tenant_id = %q, want my-tenant-id", cfg.Connection.Extra["tenant_id"])
+	}
+	if cfg.Connection.Extra["client_id"] != "my-client-id" {
+		t.Errorf("client_id = %q, want my-client-id", cfg.Connection.Extra["client_id"])
+	}
+	if cfg.Connection.Extra["client_secret"] != "s3cret!" {
+		t.Errorf("client_secret = %q, want s3cret!", cfg.Connection.Extra["client_secret"])
+	}
+
+	hcl := cfg.ResolveConnectionHCL()
+	if !containsStr(hcl, `tenant_id = "my-tenant-id"`) {
+		t.Errorf("ResolveConnectionHCL() missing expanded tenant_id: %q", hcl)
+	}
+}
+
+func TestLoadHCLConfig_EnvVarMixed(t *testing.T) {
+	t.Setenv("DRAINPIPE_TEST_TOKEN", "tok-12345")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.hcl")
+	data := []byte(`
+connection "cf" {
+  plugin = "turbot/cloudflare@latest"
+  token  = "${DRAINPIPE_TEST_TOKEN}"
+}
+
+drainpipe "test" {
+  connection  = "cf"
+  concurrency = 3
+  tables      = ["cloudflare_zone"]
+}
+`)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := LoadHCLConfig(path)
+	if err != nil {
+		t.Fatalf("LoadHCLConfig() error = %v", err)
+	}
+	cfg := result.Configs[0]
+
+	if cfg.Connection.Extra["token"] != "tok-12345" {
+		t.Errorf("token = %q, want tok-12345", cfg.Connection.Extra["token"])
+	}
+	if cfg.Concurrency != 3 {
+		t.Errorf("Concurrency = %d, want 3", cfg.Concurrency)
+	}
+}
+
 func TestLoadHCLConfig_MultipleJobs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.hcl")
