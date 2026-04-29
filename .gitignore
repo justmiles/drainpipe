@@ -7,3 +7,5 @@ bin/
 *.log
 .envrc
 .powerpipe
+*.test.hcl
+scripts

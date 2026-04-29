@@ -96,11 +96,19 @@ type HCLAccount struct {
 	Regions []string `hcl:"regions,optional"`
 }
 
+// HCLOrg configures multi-account/multi-subscription discovery. The org {}
+// block is provider-agnostic: for AWS, organizations holds OU IDs and
+// role_name/assume_role_name control STS AssumeRole; for Azure, organizations
+// holds tenant IDs (role fields are unused since the same service principal
+// credentials work across all subscriptions).
+//
+// Overrides use match_account_ids and match_account_names to target specific
+// accounts (AWS) or subscriptions (Azure) for table customization or skipping.
 type HCLOrg struct {
-	RoleName       string        `hcl:"role_name,optional"`
-	AssumeRoleName string        `hcl:"assume_role_name,optional"`
-	AdminAccountID string        `hcl:"admin_account_id,optional"`
-	Organizations  []string      `hcl:"organizations,optional"`
+	RoleName       string        `hcl:"role_name,optional"`       // AWS only: IAM role name
+	AssumeRoleName string        `hcl:"assume_role_name,optional"` // AWS only: alias for role_name
+	AdminAccountID string        `hcl:"admin_account_id,optional"` // AWS only: management account to skip
+	Organizations  []string      `hcl:"organizations,optional"`   // AWS: OU IDs; Azure: tenant IDs
 	Overrides      []HCLOverride `hcl:"override,block"`
 }
 

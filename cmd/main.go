@@ -363,6 +363,34 @@ func runDrain(logger zerolog.Logger) {
 					cfgLog.Info().Int("accounts", len(accountSetups)).Msg("multi-account mode: collecting from organization")
 				}
 			}
+		} else if drainpipeCfg.Provider == "azure" || pluginRef.Name == "azure" {
+			azureMP := buildAzureMultiSubscription(drainpipeCfg)
+			if azureMP != nil {
+				subs, err := azureMP.DiscoverSubscriptions(ctx)
+				if err != nil {
+					cfgLog.Fatal().Err(err).Msg("failed to discover Azure subscriptions")
+				}
+				for _, sub := range subs {
+					acctEntries := cfgTableEntries
+					if len(acctEntries) == 0 {
+						overrides, skip := drainpipeCfg.TablesForAccount(sub.SubscriptionID, sub.DisplayName)
+						if skip {
+							cfgLog.Info().Str("subscription_id", sub.SubscriptionID).Msg("skipping subscription (config override)")
+							continue
+						}
+						if len(overrides) > 0 {
+							acctEntries = overrides
+						}
+					}
+					accountSetups = append(accountSetups, accountSetup{
+						connConfig:   sub.ConnectionConfig,
+						accountID:    sub.SubscriptionID,
+						accountName:  sub.DisplayName,
+						tableEntries: acctEntries,
+					})
+				}
+				cfgLog.Info().Int("subscriptions", len(accountSetups)).Msg("multi-subscription mode: collecting from Azure tenants")
+			}
 		}
 
 		if len(accountSetups) == 0 {
@@ -770,6 +798,28 @@ func buildAWSMultiAccount(cfg *config.DrainpipeConfig) *provider.AWSMultiAccount
 	}
 
 	return provider.NewAWSMultiAccount(cfg.Connection.Profile, cfg.Connection.Regions, orgSettings)
+}
+
+// buildAzureMultiSubscription constructs an AzureMultiSubscription from config
+// if the org block contains tenant IDs (via the organizations field). Returns
+// nil when multi-subscription mode is not configured.
+//
+// The org {} block is reused across providers: for AWS, organizations holds OU
+// IDs; for Azure, it holds tenant IDs. The service principal credentials
+// (client_id, client_secret) are read from the connection's extra attributes.
+func buildAzureMultiSubscription(cfg *config.DrainpipeConfig) *provider.AzureMultiSubscription {
+	effectiveOrg := cfg.EffectiveOrg()
+	if effectiveOrg == nil || len(effectiveOrg.Organizations) == 0 {
+		return nil
+	}
+
+	clientID, _ := cfg.Connection.Extra["client_id"].(string)
+	clientSecret, _ := cfg.Connection.Extra["client_secret"].(string)
+	if clientID == "" || clientSecret == "" {
+		return nil
+	}
+
+	return provider.NewAzureMultiSubscription(clientID, clientSecret, effectiveOrg.Organizations)
 }
 
 // ── Work item processing ──────────────────────────────────────────────

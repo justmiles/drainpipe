@@ -277,11 +277,15 @@ type AccountEntry struct {
 	Regions []string `yaml:"regions"`
 }
 
-// OrgConfig holds AWS Organizations configuration.
+// OrgConfig holds multi-account discovery configuration. This struct is
+// shared across providers: for AWS, Organizations holds OU IDs and
+// RoleName/AssumeRoleName control STS AssumeRole; for Azure, Organizations
+// holds tenant IDs (the role fields are unused since the same service
+// principal credentials work across all subscriptions within a tenant).
 type OrgConfig struct {
 	RoleName       string        `yaml:"role_name"`
 	AdminAccountID string        `yaml:"admin_account_id"`
-	Organizations  []string      `yaml:"organizations"`
+	Organizations  []string      `yaml:"organizations"`    // AWS: OU IDs; Azure: tenant IDs
 	AssumeRoleName string        `yaml:"assume_role_name"`
 	Overrides      []OrgOverride `yaml:"overrides"`
 }
