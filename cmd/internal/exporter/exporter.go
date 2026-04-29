@@ -399,6 +399,9 @@ func columnToInterface(col *proto.Column) interface{} {
 	case *proto.Column_BoolValue:
 		return v.BoolValue
 	case *proto.Column_JsonValue:
+		if len(v.JsonValue) == 0 || string(v.JsonValue) == "null" {
+			return nil
+		}
 		return string(v.JsonValue)
 	case *proto.Column_TimestampValue:
 		return v.TimestampValue.AsTime()

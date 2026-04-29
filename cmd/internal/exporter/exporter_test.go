@@ -43,6 +43,20 @@ func TestColumnToInterface_JSON(t *testing.T) {
 	}
 }
 
+func TestColumnToInterface_JSONNull(t *testing.T) {
+	col := &proto.Column{Value: &proto.Column_JsonValue{JsonValue: []byte("null")}}
+	if got := columnToInterface(col); got != nil {
+		t.Errorf("got %v, want nil for JSON null literal", got)
+	}
+}
+
+func TestColumnToInterface_JSONEmpty(t *testing.T) {
+	col := &proto.Column{Value: &proto.Column_JsonValue{JsonValue: []byte{}}}
+	if got := columnToInterface(col); got != nil {
+		t.Errorf("got %v, want nil for empty JSON bytes", got)
+	}
+}
+
 func TestColumnToInterface_Timestamp(t *testing.T) {
 	ts := timestamppb.New(time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC))
 	col := &proto.Column{Value: &proto.Column_TimestampValue{TimestampValue: ts}}
