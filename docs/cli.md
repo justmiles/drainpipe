@@ -5,9 +5,46 @@ drainpipe <command> [options]
 
 Commands:
   drain            Export resources into PostgreSQL
+  validate         Validate config: download plugins, check table names and key columns
   list-tables      List available tables for a provider
   list-providers   List known providers and their default plugins
+  download-plugins Download plugin binaries for a config file
 ```
+
+## `validate`
+
+Validate a configuration without connecting to cloud providers or databases. Downloads plugins as needed and checks that every table pattern resolves to at least one supported table with valid key columns.
+
+```bash
+# Validate the default config file
+drainpipe validate
+
+# Validate a specific config file
+drainpipe validate --config ./drainpipe.hcl
+
+# Validate multiple config files
+drainpipe validate --config aws.hcl --config cloudflare.hcl
+```
+
+### What it checks
+
+| Check | Severity | Description |
+|-------|----------|-------------|
+| Table exists | Error | Exact table names in config exist in the plugin schema |
+| Glob matches tables | Warning | Glob patterns like `aws_ec2_*` match at least one table |
+| Natural key | Error | Each matched table has a discoverable key (or an explicit `key` block) |
+| `key` columns exist | Error | Explicitly listed `key` columns are present in the plugin schema |
+| `where` columns | Warning | Filter columns exist and are key columns on that table |
+| `columns` subset | Warning | Explicit column list references valid plugin columns |
+| `filter_query.column` | Error/Warning | Filter query column exists and is a key column |
+
+Exits with code 0 if no errors, 1 if any errors are found.
+
+### Flags
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--config` | `-c` | `drainpipe.hcl` | Config file path (repeatable) |
 
 ## `drain`
 

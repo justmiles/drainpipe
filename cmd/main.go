@@ -46,6 +46,8 @@ func main() {
 	switch os.Args[1] {
 	case "drain":
 		runDrain(logger)
+	case "validate":
+		runValidate(logger)
 	case "list-tables":
 		runListTables(logger)
 	case "list-providers":
@@ -67,6 +69,7 @@ Usage:
 
 Commands:
   drain              Export resources into PostgreSQL
+  validate           Validate config: download plugins, check table names and key columns
   list-tables        List available tables for a provider
   list-providers     List known providers and their default plugins
   download-plugins   Download plugin binaries for a config file
@@ -77,6 +80,9 @@ Drain options:
   --tables, -t     Comma-separated table patterns (required if not in config)
                    Examples: "aws_ec2_*", "aws_s3_bucket", "aws_*"
                    Only matches tables with discoverable natural keys.
+
+Validate options:
+  --config, -c     Config file path(s), .hcl or .yaml (default: drainpipe.hcl or drainpipe.yaml)
 
 List-tables options:
   --provider, -p   Provider name or plugin spec (default: aws)
@@ -1230,6 +1236,359 @@ func runListProviders() {
 	}
 	fmt.Println()
 	fmt.Println("Use any Steampipe plugin with 'plugin: org/name@version' in your config.")
+}
+
+// runValidate loads configs, downloads plugins (without assuming roles or
+// connecting to real credentials), and checks that every table pattern
+// resolves to at least one supported table with valid key columns.
+func runValidate(logger zerolog.Logger) {
+	flags := parseFlags(os.Args[2:])
+	configPathRaw := flagOrDefault(flags, "config", defaultConfigPath())
+
+	var configPaths []string
+	for _, p := range strings.Split(configPathRaw, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			configPaths = append(configPaths, p)
+		}
+	}
+
+	configs, _, err := config.LoadAllConfigs(configPaths)
+	if err != nil {
+		logger.Fatal().Err(err).Strs("configs", configPaths).Msg("failed to load config")
+	}
+	if len(configs) == 0 {
+		logger.Fatal().Strs("configs", configPaths).Msg("no config blocks found")
+	}
+
+	pluginMgr := pluginmanager.NewManager("", logger.With().Str("component", "pluginmanager").Logger())
+
+	type validationIssue struct {
+		severity string // "error" or "warning"
+		block    string
+		table    string
+		msg      string
+	}
+
+	var allIssues []validationIssue
+	totalTables := 0
+
+	for cfgIdx, drainpipeCfg := range configs {
+		cfgLog := logger.With().Int("config_block", cfgIdx+1).Logger()
+
+		// Resolve plugin specifier
+		pluginSpec, ok := drainpipeCfg.ResolvePluginSpec()
+		if !ok {
+			provName := drainpipeCfg.Provider
+			if provName == "" {
+				provName = "(unset)"
+			}
+			allIssues = append(allIssues, validationIssue{
+				severity: "error",
+				block:    fmt.Sprintf("block %d", cfgIdx+1),
+				msg:      fmt.Sprintf("unknown provider %q; specify 'plugin' field or use a known provider name", provName),
+			})
+			continue
+		}
+
+		pluginRef, err := pluginmanager.ParsePluginRef(pluginSpec)
+		if err != nil {
+			allIssues = append(allIssues, validationIssue{
+				severity: "error",
+				block:    fmt.Sprintf("block %d", cfgIdx+1),
+				msg:      fmt.Sprintf("invalid plugin specifier %q: %v", pluginSpec, err),
+			})
+			continue
+		}
+
+		blockName := fmt.Sprintf("block %d (%s/%s@%s)", cfgIdx+1, pluginRef.Org, pluginRef.Name, pluginRef.Version)
+		cfgLog = cfgLog.With().
+			Str("plugin", pluginRef.Org+"/"+pluginRef.Name).
+			Str("version", pluginRef.Version).
+			Logger()
+
+		// Resolve and download plugin binary
+		var binaryPath string
+		if drainpipeCfg.PluginPath != "" {
+			binaryPath, err = pluginMgr.EnsurePluginFromPath(drainpipeCfg.PluginPath)
+		} else {
+			binaryPath, err = pluginMgr.EnsurePlugin(pluginRef)
+		}
+		if err != nil {
+			allIssues = append(allIssues, validationIssue{
+				severity: "error",
+				block:    blockName,
+				msg:      fmt.Sprintf("failed to resolve plugin binary: %v", err),
+			})
+			continue
+		}
+		cfgLog.Info().Str("binary", binaryPath).Msg("plugin binary resolved")
+
+		// Launch plugin with empty connection config (schema discovery only —
+		// no real credentials or role assumption needed).
+		exp, err := exporter.New(pluginRef.Name, pluginRef.PluginName(), binaryPath, cfgLog)
+		if err != nil {
+			allIssues = append(allIssues, validationIssue{
+				severity: "error",
+				block:    blockName,
+				msg:      fmt.Sprintf("failed to launch plugin: %v", err),
+			})
+			continue
+		}
+		if err := exp.SetConnectionConfig(""); err != nil {
+			exp.Close()
+			allIssues = append(allIssues, validationIssue{
+				severity: "error",
+				block:    blockName,
+				msg:      fmt.Sprintf("failed to configure plugin for schema discovery: %v", err),
+			})
+			continue
+		}
+
+		// Discover the full plugin schema (all tables + all columns + key columns)
+		allSchemas, err := exp.GetAllSchemas()
+		exp.Close()
+		if err != nil {
+			allIssues = append(allIssues, validationIssue{
+				severity: "error",
+				block:    blockName,
+				msg:      fmt.Sprintf("failed to get plugin schema: %v", err),
+			})
+			continue
+		}
+
+		preferredKey := drainpipeCfg.ResolveNaturalKey()
+
+		// Build a supported-tables map (name → natural key columns) for tables
+		// that have auto-discoverable keys.
+		supported := make(map[string][]string)
+		for name, tableSchema := range allSchemas {
+			keys := provider.NaturalKeyColumns(name, tableSchema, preferredKey)
+			if len(keys) > 0 {
+				supported[name] = keys
+			}
+		}
+
+		cfgLog.Info().
+			Int("total_tables", len(allSchemas)).
+			Int("supported_tables", len(supported)).
+			Msg("plugin schema discovered")
+
+		if len(drainpipeCfg.Tables) == 0 {
+			allIssues = append(allIssues, validationIssue{
+				severity: "error",
+				block:    blockName,
+				msg:      "no tables configured",
+			})
+			continue
+		}
+
+		// Build a lookup for per-table config entries (for key/where/columns validation)
+		entryMap := config.TableEntryMap(drainpipeCfg.Tables)
+
+		// Build the full set of table names the plugin knows about (for pattern matching).
+		// Tables with an explicit key in their config entry are always collectable
+		// even if the plugin doesn't advertise a natural key for them.
+		allTableNames := make([]string, 0, len(allSchemas))
+		for name := range allSchemas {
+			allTableNames = append(allTableNames, name)
+		}
+		for _, te := range drainpipeCfg.Tables {
+			if len(te.Key) > 0 {
+				if _, exists := allSchemas[te.Name]; !exists {
+					// Table not in schema at all — will be caught below
+					allTableNames = append(allTableNames, te.Name)
+				}
+			}
+		}
+		sort.Strings(allTableNames)
+
+		// Resolve patterns to concrete table names (same logic as runDrain Phase 1b)
+		patterns := config.TableNames(drainpipeCfg.Tables)
+		matched := match.Tables(allTableNames, patterns)
+
+		// Check patterns that matched no tables at all
+		for _, pat := range patterns {
+			hasWildcard := strings.ContainsAny(pat, "*?")
+			if hasWildcard {
+				// Glob pattern — check if anything matched
+				globMatches := match.Tables(allTableNames, []string{pat})
+				if len(globMatches) == 0 {
+					suggestions := match.Suggest(allTableNames, []string{pat}, 3)
+					msgParts := fmt.Sprintf("pattern %q matched no tables in plugin schema", pat)
+					if len(suggestions) > 0 {
+						msgParts += fmt.Sprintf(" (did you mean: %s?)", strings.Join(suggestions, ", "))
+					}
+					allIssues = append(allIssues, validationIssue{
+						severity: "warning",
+						block:    blockName,
+						msg:      msgParts,
+					})
+				}
+			} else {
+				// Exact table name — must exist in schema
+				if _, exists := allSchemas[pat]; !exists {
+					// If it has an explicit key override, we accepted it into allTableNames;
+					// that means it was added but still not in the plugin. Error.
+					suggestions := match.Suggest(allTableNames, []string{pat}, 3)
+					msgParts := fmt.Sprintf("table %q not found in plugin schema", pat)
+					if len(suggestions) > 0 {
+						msgParts += fmt.Sprintf(" (did you mean: %s?)", strings.Join(suggestions, ", "))
+					}
+					allIssues = append(allIssues, validationIssue{
+						severity: "error",
+						block:    blockName,
+						table:    pat,
+						msg:      msgParts,
+					})
+				}
+			}
+		}
+
+		// Per-table validation for each resolved table
+		for _, tableName := range matched {
+			totalTables++
+			te, hasEntry := entryMap[tableName]
+			tableSchema := allSchemas[tableName] // may be nil if table was injected via explicit key
+
+			// Determine effective natural key
+			var effectiveKey []string
+			if hasEntry && len(te.Key) > 0 {
+				// Explicit key override — always valid
+				effectiveKey = te.Key
+			} else if keys, ok := supported[tableName]; ok {
+				effectiveKey = keys
+			}
+
+			if len(effectiveKey) == 0 {
+				allIssues = append(allIssues, validationIssue{
+					severity: "error",
+					block:    blockName,
+					table:    tableName,
+					msg:      fmt.Sprintf("table %q has no discoverable natural key; add a 'key' block to specify one", tableName),
+				})
+			}
+
+			// Skip column-level checks if we don't have a schema for this table
+			if tableSchema == nil {
+				continue
+			}
+
+			// Build column and key-column sets from the schema
+			schemaColSet := make(map[string]bool, len(tableSchema.Columns))
+			for _, col := range tableSchema.Columns {
+				schemaColSet[col.Name] = true
+			}
+			keyColSet := make(map[string]bool)
+			for _, kc := range tableSchema.GetCallKeyColumnList {
+				keyColSet[kc.Name] = true
+			}
+			// Also add the preferred key column if it exists in the schema
+			if preferredKey != "" && schemaColSet[preferredKey] {
+				keyColSet[preferredKey] = true
+			}
+
+			if !hasEntry {
+				continue
+			}
+
+			// Validate explicit key columns exist in the schema
+			if len(te.Key) > 0 {
+				for _, k := range te.Key {
+					if !schemaColSet[k] {
+						allIssues = append(allIssues, validationIssue{
+							severity: "error",
+							block:    blockName,
+							table:    tableName,
+							msg:      fmt.Sprintf("table %q: key column %q does not exist in plugin schema", tableName, k),
+						})
+					}
+				}
+			}
+
+			// Validate where filter columns are valid key columns
+			for col := range te.Where {
+				if !keyColSet[col] && !schemaColSet[col] {
+					allIssues = append(allIssues, validationIssue{
+						severity: "warning",
+						block:    blockName,
+						table:    tableName,
+						msg:      fmt.Sprintf("table %q: where column %q does not exist in plugin schema", tableName, col),
+					})
+				} else if !keyColSet[col] {
+					allIssues = append(allIssues, validationIssue{
+						severity: "warning",
+						block:    blockName,
+						table:    tableName,
+						msg:      fmt.Sprintf("table %q: where column %q exists but is not a key column; filtering may not work as expected", tableName, col),
+					})
+				}
+			}
+
+			// Validate explicit column list
+			for _, col := range te.Columns {
+				if !schemaColSet[col] {
+					allIssues = append(allIssues, validationIssue{
+						severity: "warning",
+						block:    blockName,
+						table:    tableName,
+						msg:      fmt.Sprintf("table %q: column %q in 'columns' list does not exist in plugin schema", tableName, col),
+					})
+				}
+			}
+
+			// Validate filter_query column
+			if te.FilterQuery != nil {
+				col := te.FilterQuery.Column
+				if !schemaColSet[col] {
+					allIssues = append(allIssues, validationIssue{
+						severity: "error",
+						block:    blockName,
+						table:    tableName,
+						msg:      fmt.Sprintf("table %q: filter_query column %q does not exist in plugin schema", tableName, col),
+					})
+				} else if !keyColSet[col] {
+					allIssues = append(allIssues, validationIssue{
+						severity: "warning",
+						block:    blockName,
+						table:    tableName,
+						msg:      fmt.Sprintf("table %q: filter_query column %q exists but is not a key column; filtering may be inefficient", tableName, col),
+					})
+				}
+			}
+		}
+	}
+
+	// ── Print validation results ─────────────────────────────────────
+	errCount := 0
+	warnCount := 0
+	for _, issue := range allIssues {
+		switch issue.severity {
+		case "error":
+			errCount++
+			if issue.table != "" {
+				fmt.Fprintf(os.Stderr, "  ✗ [%s] %s\n", issue.block, issue.msg)
+			} else {
+				fmt.Fprintf(os.Stderr, "  ✗ [%s] %s\n", issue.block, issue.msg)
+			}
+		case "warning":
+			warnCount++
+			fmt.Fprintf(os.Stderr, "  ⚠ [%s] %s\n", issue.block, issue.msg)
+		}
+	}
+
+	if len(allIssues) > 0 {
+		fmt.Fprintln(os.Stderr)
+	}
+
+	summary := fmt.Sprintf("validation complete: %d config blocks, %d tables checked, %d errors, %d warnings",
+		len(configs), totalTables, errCount, warnCount)
+
+	if errCount > 0 {
+		logger.Error().Msg(summary)
+		os.Exit(1)
+	}
+	logger.Info().Msg(summary)
 }
 
 func runDownloadPlugins(logger zerolog.Logger) {
