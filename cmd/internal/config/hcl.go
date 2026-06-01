@@ -66,7 +66,7 @@ type HCLDrainpipe struct {
 	AccountID string `hcl:"account_id,optional"`
 
 	Concurrency   int    `hcl:"concurrency,optional"`
-	Retries       int    `hcl:"retries,optional"`
+	Retries       *int   `hcl:"retries,optional"`
 	RetryDelay    string `hcl:"retry_delay,optional"`
 	TableTimeout  string `hcl:"table_timeout,optional"`
 	Strict        bool   `hcl:"strict,optional"`
@@ -79,10 +79,13 @@ type HCLDrainpipe struct {
 }
 
 type HCLTableBlock struct {
-	Name        string          `hcl:"name,label"`
+	Name        string            `hcl:"name,label"`
 	Where       map[string]string `hcl:"where,optional"`
 	Columns     []string          `hcl:"columns,optional"`
 	FilterQuery *HCLFilterQuery   `hcl:"filter_query,block"`
+	// Key overrides the natural key for this specific table. Supports composite keys.
+	// Example: key = ["recommendation_id"] or key = ["account_id", "region", "name"]
+	Key []string `hcl:"key,optional"`
 }
 
 type HCLFilterQuery struct {
@@ -263,7 +266,7 @@ func convertHCL(hclFile *HCLFile, file *hcl.File, ctx *hcl.EvalContext) (*HCLRes
 			cfg.Tables = append(cfg.Tables, TableEntry{Name: t})
 		}
 		for _, tb := range dp.TableBlocks {
-			entry := TableEntry{Name: tb.Name, Where: tb.Where, Columns: tb.Columns}
+			entry := TableEntry{Name: tb.Name, Where: tb.Where, Columns: tb.Columns, Key: tb.Key}
 			if tb.FilterQuery != nil {
 				entry.FilterQuery = &FilterQuery{
 					Column: tb.FilterQuery.Column,

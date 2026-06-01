@@ -77,6 +77,12 @@ drainpipe "aws_basic" {
       status = "ACTIVE"
     }
   }
+
+  # Tables without an arn/id column need an explicit key so drainpipe
+  # knows how to uniquely identify each row in PostgreSQL.
+  table "aws_costoptimizationhub_recommendation" {
+    key = ["recommendation_id"]
+  }
 }
 
 # Cloudflare collection

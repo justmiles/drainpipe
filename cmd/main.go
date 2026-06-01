@@ -74,7 +74,7 @@ Commands:
 Drain options:
   --config, -c     Config file path(s), .hcl or .yaml (default: drainpipe.hcl or drainpipe.yaml)
   --provider, -p   Provider name (default: aws)
-  --tables, -t     Comma-separated table patterns (overrides config file)
+  --tables, -t     Comma-separated table patterns (required if not in config)
                    Examples: "aws_ec2_*", "aws_s3_bucket", "aws_*"
                    Only matches tables with discoverable natural keys.
 
@@ -121,15 +121,16 @@ func runDrain(logger zerolog.Logger) {
 		if provName == "" {
 			provName = "aws"
 		}
+		if tablePatternsFlag == "" {
+			logger.Fatal().Msg("no tables specified; use --tables or create a config file with 'tables' entries")
+		}
 		synthetic := &config.DrainpipeConfig{
 			Provider: provName,
 		}
-		if tablePatternsFlag != "" {
-			for _, p := range strings.Split(tablePatternsFlag, ",") {
-				p = strings.TrimSpace(p)
-				if p != "" {
-					synthetic.Tables = append(synthetic.Tables, config.TableEntry{Name: p})
-				}
+		for _, p := range strings.Split(tablePatternsFlag, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				synthetic.Tables = append(synthetic.Tables, config.TableEntry{Name: p})
 			}
 		}
 		configs = []*config.DrainpipeConfig{synthetic}
@@ -172,6 +173,9 @@ func runDrain(logger zerolog.Logger) {
 		identityColumn string
 		strict         bool
 		deepHydration  bool
+		retries        int
+		retryDelay     time.Duration
+		tableTimeout   time.Duration
 		rateLimiters   []*proto.RateLimiterDefinition
 		logger         zerolog.Logger
 
@@ -187,9 +191,6 @@ func runDrain(logger zerolog.Logger) {
 	schemaMgr := schema.New(pool, logger.With().Str("component", "schema").Logger())
 
 	maxConcurrency := 1
-	maxRetries := 3
-	maxRetryDelay := 10 * time.Second
-	maxTableTimeout := 10 * time.Minute
 	anyStrict := false
 
 	for cfgIdx, drainpipeCfg := range configs {
@@ -244,8 +245,8 @@ func runDrain(logger zerolog.Logger) {
 		if drainpipeCfg.Concurrency > 0 {
 			concurrency = drainpipeCfg.Concurrency
 		}
-		if drainpipeCfg.Retries > 0 {
-			retries = drainpipeCfg.Retries
+		if drainpipeCfg.Retries != nil {
+			retries = *drainpipeCfg.Retries
 		}
 		if drainpipeCfg.RetryDelay > 0 {
 			retryDelay = drainpipeCfg.RetryDelay
@@ -262,15 +263,6 @@ func runDrain(logger zerolog.Logger) {
 
 		if concurrency > maxConcurrency {
 			maxConcurrency = concurrency
-		}
-		if retries > maxRetries {
-			maxRetries = retries
-		}
-		if retryDelay > maxRetryDelay {
-			maxRetryDelay = retryDelay
-		}
-		if tableTimeout > maxTableTimeout {
-			maxTableTimeout = tableTimeout
 		}
 		if strict {
 			anyStrict = true
@@ -431,6 +423,9 @@ func runDrain(logger zerolog.Logger) {
 				identityTable:  identityTable,
 				identityColumn: identityColumn,
 				strict:         strict,
+				retries:        retries,
+				retryDelay:     retryDelay,
+				tableTimeout:   tableTimeout,
 				deepHydration:  deepHydration,
 				rateLimiters:   limiterDefs,
 				logger: cfgLog.With().
@@ -523,6 +518,15 @@ func runDrain(logger zerolog.Logger) {
 			for name := range supported {
 				supportedNames = append(supportedNames, name)
 			}
+			// Tables with an explicit key in their entry are always collectable
+			// even if the plugin doesn't advertise a natural key for them.
+			for _, te := range job.tableEntries {
+				if len(te.Key) > 0 {
+					if _, already := supported[te.Name]; !already {
+						supportedNames = append(supportedNames, te.Name)
+					}
+				}
+			}
 			sort.Strings(supportedNames)
 			tables := match.Tables(supportedNames, patterns)
 
@@ -542,12 +546,10 @@ func runDrain(logger zerolog.Logger) {
 			}
 			job.tables = tables
 		} else {
-			tables := make([]string, 0, len(supported))
-			for name := range supported {
-				tables = append(tables, name)
-			}
-			sort.Strings(tables)
-			job.tables = tables
+			job.logger.Fatal().
+				Str("account_id", job.accountID).
+				Str("account_name", job.accountName).
+				Msg("no tables configured; specify table patterns via --tables flag or 'tables' in config")
 		}
 
 		job.where = make(map[string]map[string]string)
@@ -563,6 +565,10 @@ func runDrain(logger zerolog.Logger) {
 				}
 				if te.FilterQuery != nil {
 					job.filterQueries[tableName] = te.FilterQuery
+				}
+				// Per-table explicit key overrides supported map entry.
+				if len(te.Key) > 0 {
+					job.supported[tableName] = te.Key
 				}
 			}
 		}
@@ -619,7 +625,6 @@ func runDrain(logger zerolog.Logger) {
 		Int("accounts", len(allJobs)).
 		Int("total_tables", totalTables).
 		Int("concurrency", maxConcurrency).
-		Int("max_retries", maxRetries).
 		Msg("starting collection")
 
 	var prog progress
@@ -746,7 +751,7 @@ func runDrain(logger zerolog.Logger) {
 							Logger(),
 					}
 
-					err := collectTableWithRetry(ctx, item, schemaMgr, maxRetries, maxRetryDelay, maxTableTimeout)
+					err := collectTableWithRetry(ctx, item, schemaMgr, job.retries, job.retryDelay, job.tableTimeout)
 					if err != nil {
 						prog.failedTables.Add(1)
 						item.logger.Error().Err(err).Msg("table failed after retries")

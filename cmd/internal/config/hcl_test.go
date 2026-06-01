@@ -49,8 +49,8 @@ drainpipe "test" {
 	if cfg.Concurrency != 5 {
 		t.Errorf("Concurrency = %d, want 5", cfg.Concurrency)
 	}
-	if cfg.Retries != 3 {
-		t.Errorf("Retries = %d, want 3", cfg.Retries)
+	if cfg.Retries == nil || *cfg.Retries != 3 {
+		t.Errorf("Retries = %v, want 3", cfg.Retries)
 	}
 	if cfg.RetryDelay.Seconds() != 10 {
 		t.Errorf("RetryDelay = %v, want 10s", cfg.RetryDelay)
@@ -616,3 +616,147 @@ drainpipe "cf_inv" {
 		t.Errorf("Configs[1].Concurrency = %d, want 5", result.Configs[1].Concurrency)
 	}
 }
+
+// ---------- HCLTableBlock.Key ----------
+
+func TestLoadHCLConfig_TableBlock_Key_Single(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.hcl")
+	data := []byte(`
+connection "aws" {
+  plugin = "turbot/aws@latest"
+}
+
+drainpipe "test" {
+  connection = "aws"
+
+  table "aws_costoptimizationhub_recommendation" {
+    key = ["recommendation_id"]
+  }
+}
+`)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := LoadHCLConfig(path)
+	if err != nil {
+		t.Fatalf("LoadHCLConfig() error = %v", err)
+	}
+	cfg := result.Configs[0]
+	if len(cfg.Tables) != 1 {
+		t.Fatalf("len(Tables) = %d, want 1", len(cfg.Tables))
+	}
+	te := cfg.Tables[0]
+	if te.Name != "aws_costoptimizationhub_recommendation" {
+		t.Errorf("Name = %q", te.Name)
+	}
+	if len(te.Key) != 1 || te.Key[0] != "recommendation_id" {
+		t.Errorf("Key = %v, want [recommendation_id]", te.Key)
+	}
+}
+
+func TestLoadHCLConfig_TableBlock_Key_Composite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.hcl")
+	data := []byte(`
+connection "aws" {
+  plugin = "turbot/aws@latest"
+}
+
+drainpipe "test" {
+  connection = "aws"
+
+  table "aws_some_table" {
+    key = ["account_id", "region", "name"]
+  }
+}
+`)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := LoadHCLConfig(path)
+	if err != nil {
+		t.Fatalf("LoadHCLConfig() error = %v", err)
+	}
+	te := result.Configs[0].Tables[0]
+	if len(te.Key) != 3 {
+		t.Fatalf("len(Key) = %d, want 3", len(te.Key))
+	}
+	want := []string{"account_id", "region", "name"}
+	for i, k := range want {
+		if te.Key[i] != k {
+			t.Errorf("Key[%d] = %q, want %q", i, te.Key[i], k)
+		}
+	}
+}
+
+func TestLoadHCLConfig_TableBlock_Key_WithWhere(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.hcl")
+	data := []byte(`
+connection "aws" {
+  plugin = "turbot/aws@latest"
+}
+
+drainpipe "test" {
+  connection = "aws"
+
+  table "aws_costoptimizationhub_recommendation" {
+    key = ["recommendation_id"]
+    where = {
+      status = "active"
+    }
+  }
+}
+`)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := LoadHCLConfig(path)
+	if err != nil {
+		t.Fatalf("LoadHCLConfig() error = %v", err)
+	}
+	te := result.Configs[0].Tables[0]
+	if len(te.Key) != 1 || te.Key[0] != "recommendation_id" {
+		t.Errorf("Key = %v", te.Key)
+	}
+	if te.Where["status"] != "active" {
+		t.Errorf("Where[status] = %q", te.Where["status"])
+	}
+}
+
+func TestLoadHCLConfig_TableBlock_Key_Absent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.hcl")
+	data := []byte(`
+connection "aws" {
+  plugin = "turbot/aws@latest"
+}
+
+drainpipe "test" {
+  connection = "aws"
+
+  table "aws_s3_bucket" {
+    where = {
+      region = "us-east-1"
+    }
+  }
+}
+`)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := LoadHCLConfig(path)
+	if err != nil {
+		t.Fatalf("LoadHCLConfig() error = %v", err)
+	}
+	te := result.Configs[0].Tables[0]
+	if len(te.Key) != 0 {
+		t.Errorf("Key = %v, want empty when not specified", te.Key)
+	}
+}
+

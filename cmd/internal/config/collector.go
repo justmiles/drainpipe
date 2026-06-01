@@ -32,6 +32,10 @@ type TableEntry struct {
 	Where       map[string]string `yaml:"where"`
 	Columns     []string          `yaml:"columns"`
 	FilterQuery *FilterQuery      `yaml:"filter_query"`
+	// Key overrides the natural key for this specific table, bypassing both the
+	// drainpipe-level natural_key and auto-discovery. Supports composite keys.
+	// Example: key: [recommendation_id] or key: [account_id, region, name]
+	Key []string `yaml:"key"`
 }
 
 // UnmarshalYAML allows a TableEntry to be specified as either a plain string
@@ -91,7 +95,7 @@ type DrainpipeConfig struct {
 	// ── Shared fields ───────────────────────────────────────────
 	Tables        []TableEntry  `yaml:"tables"`
 	Concurrency   int           `yaml:"concurrency"`
-	Retries       int           `yaml:"retries"`
+	Retries       *int          `yaml:"retries"`
 	RetryDelay    time.Duration `yaml:"retry_delay"`
 	TableTimeout  time.Duration `yaml:"table_timeout"`
 	Strict        bool          `yaml:"strict"`

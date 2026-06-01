@@ -55,8 +55,8 @@ strict: true
 	if cfg.Concurrency != 4 {
 		t.Errorf("Concurrency = %d, want 4", cfg.Concurrency)
 	}
-	if cfg.Retries != 5 {
-		t.Errorf("Retries = %d, want 5", cfg.Retries)
+	if cfg.Retries == nil || *cfg.Retries != 5 {
+		t.Errorf("Retries = %v, want 5", cfg.Retries)
 	}
 	if !cfg.Strict {
 		t.Error("Strict = false, want true")
@@ -870,3 +870,119 @@ func containsStr(s, sub string) bool {
 	}
 	return false
 }
+
+// ---------- TableEntry.Key ----------
+
+func TestLoadDrainpipeConfig_TableEntryKey_Single(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "key.yaml")
+	data := []byte(`
+provider: aws
+tables:
+  - table: aws_costoptimizationhub_recommendation
+    key: [recommendation_id]
+`)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	configs, err := LoadDrainpipeConfig(path)
+	if err != nil {
+		t.Fatalf("LoadDrainpipeConfig() error = %v", err)
+	}
+	if len(configs) != 1 {
+		t.Fatalf("len(configs) = %d, want 1", len(configs))
+	}
+	tables := configs[0].Tables
+	if len(tables) != 1 {
+		t.Fatalf("len(Tables) = %d, want 1", len(tables))
+	}
+	if tables[0].Name != "aws_costoptimizationhub_recommendation" {
+		t.Errorf("Name = %q", tables[0].Name)
+	}
+	if len(tables[0].Key) != 1 || tables[0].Key[0] != "recommendation_id" {
+		t.Errorf("Key = %v, want [recommendation_id]", tables[0].Key)
+	}
+}
+
+func TestLoadDrainpipeConfig_TableEntryKey_Composite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "composite_key.yaml")
+	data := []byte(`
+provider: aws
+tables:
+  - table: aws_some_table
+    key: [account_id, region, name]
+`)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	configs, err := LoadDrainpipeConfig(path)
+	if err != nil {
+		t.Fatalf("LoadDrainpipeConfig() error = %v", err)
+	}
+	tables := configs[0].Tables
+	if len(tables[0].Key) != 3 {
+		t.Fatalf("len(Key) = %d, want 3", len(tables[0].Key))
+	}
+	want := []string{"account_id", "region", "name"}
+	for i, k := range want {
+		if tables[0].Key[i] != k {
+			t.Errorf("Key[%d] = %q, want %q", i, tables[0].Key[i], k)
+		}
+	}
+}
+
+func TestLoadDrainpipeConfig_TableEntryKey_AbsentIsNil(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nokey.yaml")
+	data := []byte(`
+provider: aws
+tables:
+  - table: aws_s3_bucket
+    where:
+      region: us-east-1
+`)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	configs, err := LoadDrainpipeConfig(path)
+	if err != nil {
+		t.Fatalf("LoadDrainpipeConfig() error = %v", err)
+	}
+	tables := configs[0].Tables
+	if len(tables[0].Key) != 0 {
+		t.Errorf("Key = %v, want nil/empty when not specified", tables[0].Key)
+	}
+}
+
+func TestLoadDrainpipeConfig_TableEntryKey_WithWhere(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "key_where.yaml")
+	data := []byte(`
+provider: aws
+tables:
+  - table: aws_costoptimizationhub_recommendation
+    key: [recommendation_id]
+    where:
+      status: active
+`)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	configs, err := LoadDrainpipeConfig(path)
+	if err != nil {
+		t.Fatalf("LoadDrainpipeConfig() error = %v", err)
+	}
+	te := configs[0].Tables[0]
+	if len(te.Key) != 1 || te.Key[0] != "recommendation_id" {
+		t.Errorf("Key = %v", te.Key)
+	}
+	if te.Where["status"] != "active" {
+		t.Errorf("Where[status] = %q", te.Where["status"])
+	}
+}
+

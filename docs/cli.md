@@ -14,11 +14,11 @@ Commands:
 Export cloud resources into PostgreSQL.
 
 ```bash
-# Target all supported tables using default provider (aws)
-drainpipe drain
-
 # Target specific tables (glob patterns)
 drainpipe drain --tables "aws_ec2_*,aws_s3_bucket"
+
+# Broad wildcard to explicitly collect all supported tables
+drainpipe drain --tables "aws_*"
 
 # Specify provider and config
 drainpipe drain --provider aws --config ./drainpipe.yaml
@@ -33,7 +33,7 @@ drainpipe drain --config org.yaml --config workloads.yaml
 |------|-------|---------|-------------|
 | `--config` | `-c` | `drainpipe.yaml` | Config file path (repeatable) |
 | `--provider` | `-p` | `aws` | Provider name (known shorthand or plugin spec) |
-| `--tables` | `-t` | *(all supported)* | Comma-separated table patterns |
+| `--tables` | `-t` | *(required)* | Comma-separated table patterns (required if not in config) |
 
 ## `list-tables`
 
