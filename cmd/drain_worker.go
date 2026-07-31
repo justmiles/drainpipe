@@ -180,7 +180,7 @@ func runWorkerPool(
 					}
 
 					tableWhere := job.where[tableName]
-					if job.sourceAccountQual != "" && sourceAccount != "" {
+					if job.sourceAccountQual != "" && sourceAccount != "" && !job.sourceAccountQualExclude[tableName] {
 						if _, alreadySet := tableWhere[job.sourceAccountQual]; !alreadySet {
 							merged := make(map[string]string, len(tableWhere)+1)
 							for k, v := range tableWhere {

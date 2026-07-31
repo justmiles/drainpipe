@@ -34,8 +34,9 @@ type accountJob struct {
 	preferredKey      string
 	identityTable     string
 	identityColumn    string
-	sourceAccountQual string
-	strict            bool
+	sourceAccountQual        string
+	sourceAccountQualExclude map[string]bool
+	strict                   bool
 	deepHydration     bool
 	retries           int
 	retryDelay        time.Duration
@@ -186,6 +187,7 @@ func buildAllJobs(
 		preferredKey := drainpipeCfg.ResolveNaturalKey()
 		identityTable, identityColumn := drainpipeCfg.ResolveIdentity()
 		sourceAccountQual := drainpipeCfg.ResolveSourceAccountQual()
+		sourceAccountQualExclude := drainpipeCfg.ResolveSourceAccountQualExcludeTables()
 
 		concurrency := 1
 		retries := 3
@@ -263,8 +265,9 @@ func buildAllJobs(
 				preferredKey:      preferredKey,
 				identityTable:     identityTable,
 				identityColumn:    identityColumn,
-				sourceAccountQual: sourceAccountQual,
-				strict:            strict,
+				sourceAccountQual:        sourceAccountQual,
+				sourceAccountQualExclude: sourceAccountQualExclude,
+				strict:                   strict,
 				retries:           retries,
 				retryDelay:        retryDelay,
 				tableTimeout:      tableTimeout,

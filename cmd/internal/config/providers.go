@@ -31,6 +31,12 @@ type ProviderDefaults struct {
 	// table. Only applied when the user has not configured an explicit
 	// filter_query for the table. User config always takes full precedence.
 	DefaultFilterQueries map[string]*FilterQuery
+	// SourceAccountQualExcludeTables is the set of tables that must NOT receive
+	// the automatic SourceAccountQual injection. Use for tables where the
+	// provider API treats the account and zone/resource qualifiers as mutually
+	// exclusive (e.g. Cloudflare's logpush API rejects requests that supply
+	// both account_id and zone_id).
+	SourceAccountQualExcludeTables map[string]bool
 }
 
 // KnownProviders maps short provider names to their default plugin settings.
@@ -66,12 +72,15 @@ var KnownProviders = map[string]ProviderDefaults{
 			// different jobs in different zones.
 			"cloudflare_logpush_job": {"id", "zone_id"},
 		},
-		// Cloudflare's API allows ~1200 req/5min (~4 req/s) for most plans.
-		// These defaults keep drainpipe well under that limit. Override via a
-		// plugin "cloudflare" { limiter … } block in your HCL config.
+		// Cloudflare enforces 1,200 requests per 5-minute window (~4 req/s
+		// average). The Steampipe plugin fans out many individual Cloudflare
+		// HTTP calls per Execute RPC (one per zone/resource), so two concurrent
+		// executes can easily burst past the ceiling. FillRate 2 req/s yields
+		// ~600 req/5 min, giving ample headroom for that fan-out.
+		// Override via a plugin "cloudflare" { limiter … } block in your HCL.
 		DefaultLimiters: []RateLimiterDef{
 			{Name: "cloudflare_concurrency", MaxConcurrency: 2},
-			{Name: "cloudflare_rate", FillRate: 3, BucketSize: 10},
+			{Name: "cloudflare_rate", FillRate: 2, BucketSize: 5},
 		},
 		// The Cloudflare plugin requires account_id as a qual on several tables.
 		// Drainpipe injects the resolved source account automatically so users
@@ -85,6 +94,12 @@ var KnownProviders = map[string]ProviderDefaults{
 				Column: "zone_id",
 				Query:  "SELECT id FROM cloudflare_zone WHERE _deleted_at IS NULL",
 			},
+		},
+		// Cloudflare's logpush API rejects requests that supply both account_id
+		// and zone_id. Since logpush jobs are queried per zone via filter_query,
+		// suppress the automatic account_id injection for that table.
+		SourceAccountQualExcludeTables: map[string]bool{
+			"cloudflare_logpush_job": true,
 		},
 	},
 }
@@ -137,6 +152,16 @@ func (c *DrainpipeConfig) ResolveSourceAccountQual() string {
 func (c *DrainpipeConfig) ResolveDefaultFilterQueries() map[string]*FilterQuery {
 	if defaults, ok := KnownProviders[c.Provider]; ok {
 		return defaults.DefaultFilterQueries
+	}
+	return nil
+}
+
+// ResolveSourceAccountQualExcludeTables returns the set of tables that must
+// not receive the automatic SourceAccountQual injection. Returns nil when the
+// provider has no such exclusions.
+func (c *DrainpipeConfig) ResolveSourceAccountQualExcludeTables() map[string]bool {
+	if defaults, ok := KnownProviders[c.Provider]; ok {
+		return defaults.SourceAccountQualExcludeTables
 	}
 	return nil
 }
