@@ -485,16 +485,19 @@ func runDrain(logger zerolog.Logger) {
 			schemaLog.Fatal().Err(err).Msg("failed to configure plugin for schema validation")
 		}
 
-		// Find the preferredKey for this plugin from the first matching job
+		// Find the preferredKey and provider table key overrides for this plugin
+		// from the first matching job.
 		var preferredKey string
+		var tableKeyOverrides map[string][]string
 		for i := range allJobs {
 			if allJobs[i].binaryPath == pi.binaryPath {
 				preferredKey = allJobs[i].preferredKey
+				tableKeyOverrides = allJobs[i].drainpipeCfg.ResolveProviderTableKeys()
 				break
 			}
 		}
 
-		supported, err := supportedTables(exp, preferredKey)
+		supported, err := supportedTables(exp, preferredKey, tableKeyOverrides)
 		if err != nil {
 			exp.Close()
 			schemaLog.Fatal().Err(err).Msg("failed to discover supported tables")
@@ -1100,8 +1103,9 @@ func mergeWhere(base map[string]string, column, value string) map[string]string 
 // ── supportedTables ───────────────────────────────────────────────────
 
 // supportedTables returns a map of table name → natural key columns for all
-// tables that have discoverable natural keys.
-func supportedTables(exp *exporter.Exporter, preferredKey string) (map[string][]string, error) {
+// tables that have discoverable natural keys. tableKeyOverrides (from
+// ProviderDefaults.TableKeys) take precedence over schema-advertised keys.
+func supportedTables(exp *exporter.Exporter, preferredKey string, tableKeyOverrides map[string][]string) (map[string][]string, error) {
 	allSchemas, err := exp.GetAllSchemas()
 	if err != nil {
 		return nil, err
@@ -1109,6 +1113,10 @@ func supportedTables(exp *exporter.Exporter, preferredKey string) (map[string][]
 
 	result := make(map[string][]string)
 	for name, tableSchema := range allSchemas {
+		if keys, ok := tableKeyOverrides[name]; ok {
+			result[name] = keys
+			continue
+		}
 		keys := provider.NaturalKeyColumns(name, tableSchema, preferredKey)
 		if len(keys) > 0 {
 			result[name] = keys
@@ -1194,7 +1202,7 @@ func runListTables(logger zerolog.Logger) {
 	}
 
 	preferredKey := cfg.ResolveNaturalKey()
-	supported, err := supportedTables(exp, preferredKey)
+	supported, err := supportedTables(exp, preferredKey, cfg.ResolveProviderTableKeys())
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to discover tables")
 	}
@@ -1358,11 +1366,17 @@ func runValidate(logger zerolog.Logger) {
 		}
 
 		preferredKey := drainpipeCfg.ResolveNaturalKey()
+		providerTableKeys := drainpipeCfg.ResolveProviderTableKeys()
 
 		// Build a supported-tables map (name → natural key columns) for tables
-		// that have auto-discoverable keys.
+		// that have auto-discoverable keys. Provider table key overrides (e.g.
+		// composite keys for zone-scoped Cloudflare tables) are applied first.
 		supported := make(map[string][]string)
 		for name, tableSchema := range allSchemas {
+			if keys, ok := providerTableKeys[name]; ok {
+				supported[name] = keys
+				continue
+			}
 			keys := provider.NaturalKeyColumns(name, tableSchema, preferredKey)
 			if len(keys) > 0 {
 				supported[name] = keys

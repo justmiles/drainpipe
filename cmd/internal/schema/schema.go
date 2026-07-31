@@ -125,16 +125,20 @@ func TableColumns(pluginSchema *proto.TableSchema) []string {
 func (m *Manager) createTable(ctx context.Context, pgTable string, pluginCols []ColumnDef, naturalKeys []string) error {
 	var colDefs []string
 	for _, col := range pluginCols {
-		colDefs = append(colDefs, fmt.Sprintf("  %s %s", col.Name, col.PGType))
+		colDefs = append(colDefs, fmt.Sprintf("  %s %s", qi(col.Name), col.PGType))
 	}
 	for _, col := range drainpipeColumns {
-		colDefs = append(colDefs, fmt.Sprintf("  %s %s", col.Name, col.PGType))
+		colDefs = append(colDefs, fmt.Sprintf("  %s %s", qi(col.Name), col.PGType))
 	}
 
 	// Primary key = (_source_account, ...naturalKeys...)
 	if len(naturalKeys) > 0 {
 		pkCols := append([]string{"_source_account"}, naturalKeys...)
-		colDefs = append(colDefs, fmt.Sprintf("  PRIMARY KEY (%s)", strings.Join(pkCols, ", ")))
+		quotedPK := make([]string, len(pkCols))
+		for i, c := range pkCols {
+			quotedPK[i] = qi(c)
+		}
+		colDefs = append(colDefs, fmt.Sprintf("  PRIMARY KEY (%s)", strings.Join(quotedPK, ", ")))
 	}
 
 	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n%s\n)", pgTable, strings.Join(colDefs, ",\n"))
@@ -174,7 +178,7 @@ func (m *Manager) existingColumns(ctx context.Context, pgTable string) (map[stri
 }
 
 func (m *Manager) addColumn(ctx context.Context, pgTable string, col ColumnDef) error {
-	sql := fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s", pgTable, col.Name, col.PGType)
+	sql := fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s", pgTable, qi(col.Name), col.PGType)
 	_, err := m.pool.Exec(ctx, sql)
 	return err
 }
@@ -199,16 +203,19 @@ func (m *Manager) reconcilePK(ctx context.Context, pgTable string, naturalKeys [
 		Msg("primary key mismatch, altering")
 
 	if conname != "" {
-		dropSQL := fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", pgTable, conname)
+		dropSQL := fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", pgTable, qi(conname))
 		if _, err := m.pool.Exec(ctx, dropSQL); err != nil {
 			return fmt.Errorf("dropping old PK: %w", err)
 		}
 	}
 
-	pkList := strings.Join(desired, ", ")
-	addSQL := fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)", pgTable, pkList)
+	quotedDesired := make([]string, len(desired))
+	for i, c := range desired {
+		quotedDesired[i] = qi(c)
+	}
+	addSQL := fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)", pgTable, strings.Join(quotedDesired, ", "))
 	if _, err := m.pool.Exec(ctx, addSQL); err != nil {
-		return fmt.Errorf("adding new PK (%s): %w", pkList, err)
+		return fmt.Errorf("adding new PK (%s): %w", strings.Join(desired, ", "), err)
 	}
 
 	return nil
@@ -255,6 +262,12 @@ func slicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// qi double-quotes a PostgreSQL identifier, escaping any embedded quotes.
+// Use for column and constraint names to handle reserved keywords (e.g. "when").
+func qi(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
 func schemaToColumns(s *proto.TableSchema) []ColumnDef {

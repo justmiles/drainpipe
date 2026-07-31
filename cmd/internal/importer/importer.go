@@ -200,34 +200,60 @@ func rowToValues(row exporter.Row, columns []string) []interface{} {
 
 // upsert merges staging rows into the live table, scoped to _source_account.
 // The INSERT sets _source_account on every row.
+//
+// DISTINCT ON deduplicates staging rows that share the same natural key before
+// the INSERT, preventing "ON CONFLICT DO UPDATE command cannot affect row a
+// second time" errors from plugins that return the same resource multiple times
+// (e.g. account-level resources iterated per zone).
 func (imp *Importer) upsert(ctx context.Context, tx pgx.Tx, stagingTable, pgTable string, naturalKeys, columns []string) (int64, error) {
-	colList := strings.Join(columns, ", ")
+	quotedCols := make([]string, len(columns))
+	for i, c := range columns {
+		quotedCols[i] = qi(c)
+	}
+	colList := strings.Join(quotedCols, ", ")
 
 	// PK includes _source_account + natural keys
 	pkCols := append([]string{"_source_account"}, naturalKeys...)
-	pkList := strings.Join(pkCols, ", ")
+	quotedPK := make([]string, len(pkCols))
+	for i, c := range pkCols {
+		quotedPK[i] = qi(c)
+	}
+	pkList := strings.Join(quotedPK, ", ")
 
 	// SET clause: update all non-key columns + tracking
 	var setClauses []string
 	for _, col := range columns {
 		if !contains(naturalKeys, col) {
-			setClauses = append(setClauses, fmt.Sprintf("%s = EXCLUDED.%s", col, col))
+			setClauses = append(setClauses, fmt.Sprintf("%s = EXCLUDED.%s", qi(col), qi(col)))
 		}
 	}
 	setClauses = append(setClauses, "_last_seen_at = now()")
 	setClauses = append(setClauses, "_deleted_at = NULL")
 
-	// The staging table doesn't have _source_account, so we inject it as a literal
+	// Build the SELECT. When natural keys are present, DISTINCT ON ensures only
+	// one staging row per key reaches the INSERT, so ON CONFLICT never sees the
+	// same target row twice within a single statement.
+	var selectClause string
+	if len(naturalKeys) > 0 {
+		quotedKeys := make([]string, len(naturalKeys))
+		for i, k := range naturalKeys {
+			quotedKeys[i] = qi(k)
+		}
+		keyList := strings.Join(quotedKeys, ", ")
+		selectClause = fmt.Sprintf("SELECT DISTINCT ON (%s) $1, %s, now(), now(), NULL FROM %s ORDER BY %s",
+			keyList, colList, stagingTable, keyList)
+	} else {
+		selectClause = fmt.Sprintf("SELECT $1, %s, now(), now(), NULL FROM %s", colList, stagingTable)
+	}
+
 	sql := fmt.Sprintf(`
 		INSERT INTO %s (_source_account, %s, _first_seen_at, _last_seen_at, _deleted_at)
-		SELECT $1, %s, now(), now(), NULL
-		FROM %s
+		%s
 		ON CONFLICT (%s) DO UPDATE SET
 			%s
 	`,
 		pgTable, colList,
-		colList,
-		stagingTable,
+		selectClause,
 		pkList,
 		strings.Join(setClauses, ",\n\t\t\t"),
 	)
@@ -244,7 +270,7 @@ func (imp *Importer) upsert(ctx context.Context, tx pgx.Tx, stagingTable, pgTabl
 func (imp *Importer) softDelete(ctx context.Context, tx pgx.Tx, stagingTable, pgTable string, naturalKeys []string) (int64, error) {
 	var conditions []string
 	for _, key := range naturalKeys {
-		conditions = append(conditions, fmt.Sprintf("live.%s = staging.%s", key, key))
+		conditions = append(conditions, fmt.Sprintf("live.%s = staging.%s", qi(key), qi(key)))
 	}
 
 	sql := fmt.Sprintf(`
@@ -276,4 +302,10 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+// qi double-quotes a PostgreSQL identifier, escaping any embedded quotes.
+// Handles reserved keywords (e.g. "when") appearing as column names.
+func qi(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }

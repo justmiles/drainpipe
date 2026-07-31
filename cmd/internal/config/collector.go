@@ -132,6 +132,10 @@ type ProviderDefaults struct {
 	IdentityTable  string // e.g. "aws_sts_caller_identity"
 	IdentityColumn string // e.g. "account_id"
 	NaturalKey     string // e.g. "arn"
+	// TableKeys overrides the natural key for specific tables where the default
+	// key resolution produces duplicates. Takes precedence over NaturalKey and
+	// plugin-advertised key columns, but is overridden by per-table key in config.
+	TableKeys map[string][]string
 }
 
 // KnownProviders maps short provider names to their default plugin settings.
@@ -153,6 +157,14 @@ var KnownProviders = map[string]ProviderDefaults{
 		IdentityTable:  "cloudflare_account",
 		IdentityColumn: "id",
 		NaturalKey:     "id",
+		// Managed transforms are zone-scoped: the same transform id (e.g.
+		// "add_visitor_location_headers") appears in every zone, so id alone
+		// is not unique. Load balancer pools and monitors are account-level
+		// but the plugin iterates them per zone, producing duplicate id values;
+		// those are handled by DISTINCT ON deduplication in the importer.
+		TableKeys: map[string][]string{
+			"cloudflare_managed_transform": {"id", "zone_id"},
+		},
 	},
 }
 
@@ -186,6 +198,16 @@ func (c *DrainpipeConfig) ResolveIdentity() (table, column string) {
 		}
 	}
 	return table, column
+}
+
+// ResolveProviderTableKeys returns per-table key overrides from the known
+// provider defaults. These take precedence over the provider-level NaturalKey
+// but are themselves overridden by per-table key entries in the config.
+func (c *DrainpipeConfig) ResolveProviderTableKeys() map[string][]string {
+	if defaults, ok := KnownProviders[c.Provider]; ok {
+		return defaults.TableKeys
+	}
+	return nil
 }
 
 // ResolveNaturalKey returns the preferred natural key column name.
