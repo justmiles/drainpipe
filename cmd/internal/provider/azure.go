@@ -14,9 +14,13 @@ import (
 // principal credentials are long-lived, so connection config is built at
 // discovery time rather than just-in-time in workers.
 type SubscriptionInfo struct {
-	SubscriptionID   string
-	DisplayName      string
-	TenantID         string
+	// SubscriptionID is the unique Azure subscription identifier.
+	SubscriptionID string
+	// DisplayName is the human-readable subscription name.
+	DisplayName string
+	// TenantID is the Azure Active Directory tenant that owns this subscription.
+	TenantID string
+	// ConnectionConfig is the pre-built HCL body for the Steampipe azure plugin.
 	ConnectionConfig string
 }
 
@@ -24,9 +28,12 @@ type SubscriptionInfo struct {
 // tenants using a single service principal. The same client_id/client_secret
 // pair authenticates against each tenant where the SP has been granted access.
 type AzureMultiSubscription struct {
-	ClientID     string
+	// ClientID is the Azure service principal application (client) ID.
+	ClientID string
+	// ClientSecret is the Azure service principal secret credential.
 	ClientSecret string
-	TenantIDs    []string
+	// TenantIDs is the list of Azure AD tenant IDs to enumerate subscriptions in.
+	TenantIDs []string
 }
 
 // NewAzureMultiSubscription creates an AzureMultiSubscription from config.
@@ -42,6 +49,8 @@ func NewAzureMultiSubscription(clientID, clientSecret string, tenantIDs []string
 // service principal across the configured tenants. Subscriptions are deduped
 // by ID (a subscription reachable from multiple tenants is reported once,
 // under the first tenant where it was seen).
+//
+// No error returns are expected during normal operation.
 func (a *AzureMultiSubscription) DiscoverSubscriptions(ctx context.Context) ([]SubscriptionInfo, error) {
 	seen := make(map[string]bool)
 	var subs []SubscriptionInfo
@@ -102,6 +111,7 @@ func (a *AzureMultiSubscription) buildConnectionHCL(tenantID, subscriptionID str
 	return strings.Join(parts, "\n")
 }
 
+// ptrVal safely dereferences a *string, returning "" if nil.
 func ptrVal(s *string) string {
 	if s == nil {
 		return ""

@@ -35,13 +35,17 @@ func DrainpipeColumnNames() []string {
 
 // ColumnDef represents a PostgreSQL column.
 type ColumnDef struct {
-	Name   string
+	// Name is the column identifier as it appears in PostgreSQL.
+	Name string
+	// PGType is the full PostgreSQL type expression (e.g. "TEXT", "BIGINT", "TIMESTAMPTZ NOT NULL DEFAULT now()").
 	PGType string
 }
 
 // Manager handles dynamic table creation and schema evolution.
 type Manager struct {
-	pool   *pgxpool.Pool
+	// pool is the PostgreSQL connection pool used for all DDL operations.
+	pool *pgxpool.Pool
+	// logger is the structured logger for schema operation events.
 	logger zerolog.Logger
 }
 
@@ -52,6 +56,8 @@ func New(pool *pgxpool.Pool, logger zerolog.Logger) *Manager {
 
 // EnsureTable creates or updates a PostgreSQL table to match the Steampipe
 // plugin schema. The primary key is (_source_account, ...naturalKeys...).
+//
+// No error returns are expected during normal operation.
 func (m *Manager) EnsureTable(ctx context.Context, pgTable string, pluginSchema *proto.TableSchema, naturalKeys []string) error {
 	log := m.logger.With().Str("table", pgTable).Logger()
 
@@ -122,6 +128,8 @@ func TableColumns(pluginSchema *proto.TableSchema) []string {
 
 // createTable builds and executes a CREATE TABLE statement.
 // Primary key includes _source_account + natural keys.
+//
+// No error returns are expected during normal operation.
 func (m *Manager) createTable(ctx context.Context, pgTable string, pluginCols []ColumnDef, naturalKeys []string) error {
 	var colDefs []string
 	for _, col := range pluginCols {
@@ -147,6 +155,9 @@ func (m *Manager) createTable(ctx context.Context, pgTable string, pluginCols []
 	return err
 }
 
+// tableExists reports whether the named table exists in the public schema.
+//
+// No error returns are expected during normal operation.
 func (m *Manager) tableExists(ctx context.Context, pgTable string) (bool, error) {
 	var exists bool
 	err := m.pool.QueryRow(ctx,
@@ -156,6 +167,9 @@ func (m *Manager) tableExists(ctx context.Context, pgTable string) (bool, error)
 	return exists, err
 }
 
+// existingColumns returns a set of column names already present in the table.
+//
+// No error returns are expected during normal operation.
 func (m *Manager) existingColumns(ctx context.Context, pgTable string) (map[string]bool, error) {
 	rows, err := m.pool.Query(ctx,
 		"SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1",
@@ -177,6 +191,9 @@ func (m *Manager) existingColumns(ctx context.Context, pgTable string) (map[stri
 	return cols, rows.Err()
 }
 
+// addColumn executes ALTER TABLE … ADD COLUMN IF NOT EXISTS for the given column.
+//
+// No error returns are expected during normal operation.
 func (m *Manager) addColumn(ctx context.Context, pgTable string, col ColumnDef) error {
 	sql := fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s", pgTable, qi(col.Name), col.PGType)
 	_, err := m.pool.Exec(ctx, sql)
@@ -185,6 +202,8 @@ func (m *Manager) addColumn(ctx context.Context, pgTable string, col ColumnDef) 
 
 // reconcilePK checks whether the existing PK matches the desired natural keys
 // and alters it if not. This handles tables created with stale key resolution.
+//
+// No error returns are expected during normal operation.
 func (m *Manager) reconcilePK(ctx context.Context, pgTable string, naturalKeys []string, log zerolog.Logger) error {
 	existing, conname, err := m.existingPKColumns(ctx, pgTable)
 	if err != nil {
@@ -223,6 +242,8 @@ func (m *Manager) reconcilePK(ctx context.Context, pgTable string, naturalKeys [
 
 // existingPKColumns returns the column names in the existing PK (in ordinal
 // order) and the constraint name, or nil/"" if no PK exists.
+//
+// No error returns are expected during normal operation.
 func (m *Manager) existingPKColumns(ctx context.Context, pgTable string) ([]string, string, error) {
 	rows, err := m.pool.Query(ctx, `
 		SELECT a.attname, c.conname
@@ -252,6 +273,7 @@ func (m *Manager) existingPKColumns(ctx context.Context, pgTable string) ([]stri
 	return cols, conname, rows.Err()
 }
 
+// slicesEqual reports whether two string slices are identical element-by-element.
 func slicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -270,6 +292,7 @@ func qi(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
+// schemaToColumns converts a Steampipe TableSchema into a sorted slice of ColumnDefs.
 func schemaToColumns(s *proto.TableSchema) []ColumnDef {
 	cols := make([]ColumnDef, 0, len(s.Columns))
 	for _, c := range s.Columns {
@@ -284,6 +307,7 @@ func schemaToColumns(s *proto.TableSchema) []ColumnDef {
 	return cols
 }
 
+// protoTypeToPG maps a Steampipe proto.ColumnType to its PostgreSQL type string.
 func protoTypeToPG(ct proto.ColumnType) string {
 	switch ct {
 	case proto.ColumnType_BOOL:

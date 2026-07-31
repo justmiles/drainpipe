@@ -19,19 +19,31 @@ import (
 // Exporter wraps a Steampipe plugin for table export, communicating via gRPC
 // to an out-of-process plugin binary.
 type Exporter struct {
-	pluginClient   *grpc.PluginClient
+	// pluginClient is the Steampipe gRPC client wrapping the go-plugin connection.
+	pluginClient *grpc.PluginClient
+	// goPluginClient is the underlying hashicorp/go-plugin client managing the child process.
 	goPluginClient *goplugin.Client
-	pluginAlias    string
-	pluginName     string
-	binaryPath     string
+	// pluginAlias is the short provider name (e.g. "aws") used in gRPC connection config.
+	pluginAlias string
+	// pluginName is the go-plugin Dispense name (e.g. "steampipe-plugin-aws").
+	pluginName string
+	// binaryPath is the filesystem path to the plugin binary.
+	binaryPath string
+	// connectionName is the Steampipe connection name sent in every gRPC request.
 	connectionName string
-	configHCL      string
-	logger         zerolog.Logger
-	mu             sync.Mutex
+	// configHCL is the last HCL connection config applied; retained for Reconnect.
+	configHCL string
+	// logger is the structured logger for plugin events.
+	logger zerolog.Logger
+	// mu guards configHCL, pluginClient, and goPluginClient during reconnect.
+	mu sync.Mutex
 
-	schemaOnce  sync.Once
+	// schemaOnce ensures GetSchema is fetched from the plugin exactly once.
+	schemaOnce sync.Once
+	// schemaCache holds the result of the one-time schema fetch.
 	schemaCache map[string]*proto.TableSchema
-	schemaErr   error
+	// schemaErr holds any error from the one-time schema fetch.
+	schemaErr error
 }
 
 // New launches a Steampipe plugin binary as a child process and connects
@@ -39,6 +51,8 @@ type Exporter struct {
 //   - pluginAlias: short name (e.g., "aws", "azure", "cloudflare")
 //   - pluginName: go-plugin Dispense name (e.g., "steampipe-plugin-aws")
 //   - binaryPath: filesystem path to the plugin binary
+//
+// No error returns are expected during normal operation.
 func New(pluginAlias, pluginName, binaryPath string, logger zerolog.Logger) (*Exporter, error) {
 	pluginMap := map[string]goplugin.Plugin{
 		pluginName: &pluginshared.WrapperPlugin{},
@@ -78,6 +92,8 @@ func (e *Exporter) Close() {
 
 // SetConnectionConfig configures the plugin with provider-specific credentials.
 // configHCL is the HCL connection config body (can be empty for default creds).
+//
+// No error returns are expected during normal operation.
 func (e *Exporter) SetConnectionConfig(configHCL string) error {
 	e.mu.Lock()
 	e.configHCL = configHCL
@@ -113,6 +129,8 @@ func (e *Exporter) SetConnectionConfig(configHCL string) error {
 // SetRateLimiters sends rate limiter definitions to the plugin via gRPC.
 // Call after SetConnectionConfig. Definitions override any plugin-compiled
 // limiters with the same name.
+//
+// No error returns are expected during normal operation.
 func (e *Exporter) SetRateLimiters(defs []*proto.RateLimiterDefinition) error {
 	if len(defs) == 0 {
 		return nil
@@ -131,6 +149,8 @@ func (e *Exporter) SetRateLimiters(defs []*proto.RateLimiterDefinition) error {
 }
 
 // fetchSchemaOnce fetches the full plugin schema exactly once and caches it.
+//
+// No error returns are expected during normal operation.
 func (e *Exporter) fetchSchemaOnce() (map[string]*proto.TableSchema, error) {
 	e.schemaOnce.Do(func() {
 		schema, err := e.pluginClient.GetSchema(e.connectionName)
@@ -152,6 +172,8 @@ func (e *Exporter) resetSchemaCache() {
 }
 
 // GetSchema returns the schema for the given table.
+//
+// No error returns are expected during normal operation.
 func (e *Exporter) GetSchema(tableName string) (*proto.TableSchema, error) {
 	schemas, err := e.fetchSchemaOnce()
 	if err != nil {
@@ -166,6 +188,8 @@ func (e *Exporter) GetSchema(tableName string) (*proto.TableSchema, error) {
 }
 
 // ListTables returns the names of all tables available in the plugin.
+//
+// No error returns are expected during normal operation.
 func (e *Exporter) ListTables() ([]string, error) {
 	schemas, err := e.fetchSchemaOnce()
 	if err != nil {
@@ -180,12 +204,16 @@ func (e *Exporter) ListTables() ([]string, error) {
 }
 
 // GetAllSchemas returns the full schema map for all tables in a single call.
+//
+// No error returns are expected during normal operation.
 func (e *Exporter) GetAllSchemas() (map[string]*proto.TableSchema, error) {
 	return e.fetchSchemaOnce()
 }
 
 // QueryOneRow exports a table and returns just the first row.
 // Useful for identity/metadata tables like aws_sts_caller_identity.
+//
+// No error returns are expected during normal operation.
 func (e *Exporter) QueryOneRow(ctx context.Context, tableName string) (Row, error) {
 	tableSchema, err := e.GetSchema(tableName)
 	if err != nil {
@@ -291,6 +319,8 @@ func (e *Exporter) Exited() bool {
 // Reconnect kills the old plugin process and launches a fresh one with
 // the same configuration. Safe to call from multiple goroutines; only
 // one reconnect runs at a time.
+//
+// No error returns are expected during normal operation.
 func (e *Exporter) Reconnect() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -329,6 +359,12 @@ func (e *Exporter) Reconnect() error {
 	return nil
 }
 
+// setConnectionConfigLocked re-applies the stored HCL connection config to the plugin.
+// Caller must hold e.mu.
+//
+// NOT CONCURRENCY SAFE! Caller must hold e.mu.
+//
+// No error returns are expected during normal operation.
 func (e *Exporter) setConnectionConfigLocked() error {
 	connectionConfig := &proto.ConnectionConfig{
 		Connection:      e.connectionName,
@@ -418,6 +454,8 @@ func columnToInterface(col *proto.Column) interface{} {
 
 // WaitForPlugin waits up to the given timeout for the plugin to be ready
 // by polling GetSchema.
+//
+// No error returns are expected during normal operation.
 func (e *Exporter) WaitForPlugin(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

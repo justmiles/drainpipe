@@ -51,6 +51,8 @@ type PluginRef struct {
 //   - "turbot/aws"        → org=turbot, name=aws, version=latest
 //   - "aws@1.30.0"        → org=turbot (default), name=aws, version=1.30.0
 //   - "aws"               → org=turbot, name=aws, version=latest
+//
+// No error returns are expected during normal operation.
 func ParsePluginRef(spec string) (PluginRef, error) {
 	ref := PluginRef{Org: "turbot", Version: "latest"}
 
@@ -91,6 +93,8 @@ func (r PluginRef) BinaryName() string {
 //  1. Drainpipe cache: ~/.drainpipe/plugins/<org>/<name>/<version>/
 //  2. Steampipe install: ~/.steampipe/plugins/hub.steampipe.io/plugins/<org>/<name>@<version>/
 //  3. Download from the Steampipe OCI registry (ghcr.io/turbot/steampipe/plugins/…)
+//
+// No error returns are expected during normal operation.
 func (m *Manager) EnsurePlugin(ref PluginRef) (string, error) {
 	// 1. Check drainpipe cache
 	cachedPath := m.cachePath(ref)
@@ -119,6 +123,8 @@ func (m *Manager) EnsurePlugin(ref PluginRef) (string, error) {
 }
 
 // EnsurePluginFromPath validates that a user-provided binary path exists and is executable.
+//
+// No error returns are expected during normal operation.
 func (m *Manager) EnsurePluginFromPath(path string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -133,10 +139,14 @@ func (m *Manager) EnsurePluginFromPath(path string) (string, error) {
 	return path, nil
 }
 
+// cachePath returns the full path where the plugin binary should be stored in
+// the drainpipe cache directory.
 func (m *Manager) cachePath(ref PluginRef) string {
 	return filepath.Join(m.CacheDir, ref.Org, ref.Name, ref.Version, ref.BinaryName())
 }
 
+// steampipePath looks up the plugin binary in the local Steampipe install
+// directory. Returns "" if not found.
 func (m *Manager) steampipePath(ref PluginRef) string {
 	home, _ := os.UserHomeDir()
 	if home == "" {
@@ -168,16 +178,23 @@ type ociManifest struct {
 	Layers []ociLayer `json:"layers"`
 }
 
+// ociLayer represents a single layer entry in an OCI image manifest.
 type ociLayer struct {
-	MediaType   string            `json:"mediaType"`
-	Digest      string            `json:"digest"`
-	Size        int64             `json:"size"`
+	// MediaType identifies the content type of the layer blob.
+	MediaType string `json:"mediaType"`
+	// Digest is the content-addressable identifier of the layer blob (e.g. "sha256:…").
+	Digest string `json:"digest"`
+	// Size is the byte size of the compressed layer blob.
+	Size int64 `json:"size"`
+	// Annotations are optional metadata key-value pairs attached to the layer.
 	Annotations map[string]string `json:"annotations"`
 }
 
 // download fetches the plugin binary from the Steampipe OCI registry (GHCR)
 // using the standard OCI Distribution HTTP API, matching how `steampipe plugin
 // install` resolves images.
+//
+// No error returns are expected during normal operation.
 func (m *Manager) download(ref PluginRef, destPath string) error {
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
@@ -239,6 +256,8 @@ func (m *Manager) download(ref PluginRef, destPath string) error {
 }
 
 // ghcrToken obtains an anonymous pull token for a GHCR repository.
+//
+// No error returns are expected during normal operation.
 func (m *Manager) ghcrToken(repo string) (string, error) {
 	url := fmt.Sprintf("https://%s/token?scope=repository:%s:pull", ghcrHost, repo)
 	resp, err := http.Get(url)
@@ -261,6 +280,8 @@ func (m *Manager) ghcrToken(repo string) (string, error) {
 }
 
 // fetchManifest retrieves the OCI image manifest for the given repo:tag.
+//
+// No error returns are expected during normal operation.
 func (m *Manager) fetchManifest(repo, tag, token string) (*ociManifest, error) {
 	url := fmt.Sprintf("https://%s/v2/%s/manifests/%s", ghcrHost, repo, tag)
 	req, err := http.NewRequest("GET", url, nil)
@@ -289,6 +310,8 @@ func (m *Manager) fetchManifest(repo, tag, token string) (*ociManifest, error) {
 
 // downloadBlob fetches an OCI blob (the gzipped plugin binary) and
 // decompresses it to destPath.
+//
+// No error returns are expected during normal operation.
 func (m *Manager) downloadBlob(repo, digest, token, destPath string) error {
 	url := fmt.Sprintf("https://%s/v2/%s/blobs/%s", ghcrHost, repo, digest)
 	req, err := http.NewRequest("GET", url, nil)
@@ -327,6 +350,7 @@ func (m *Manager) downloadBlob(repo, digest, token, destPath string) error {
 	return nil
 }
 
+// findLayerDigest returns the digest of the first layer matching mediaType, or "".
 func findLayerDigest(layers []ociLayer, mediaType string) string {
 	for _, l := range layers {
 		if l.MediaType == mediaType {
@@ -336,6 +360,7 @@ func findLayerDigest(layers []ociLayer, mediaType string) string {
 	return ""
 }
 
+// fileExists reports whether path refers to an existing regular file.
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()

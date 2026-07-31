@@ -13,6 +13,8 @@ import (
 	"github.com/justmiles/drainpipe/cmd/internal/pluginmanager"
 )
 
+// runListTables discovers and prints supported tables for a given provider,
+// showing the natural key columns for each table.
 func runListTables(logger zerolog.Logger) {
 	flags := parseFlags(os.Args[2:])
 	providerName := flagOrDefault(flags, "provider", "aws")
@@ -82,6 +84,8 @@ func runListTables(logger zerolog.Logger) {
 	}
 }
 
+// runListProviders prints all known provider shorthand names and their
+// associated plugin specifiers.
 func runListProviders() {
 	fmt.Println("Known providers (shorthand → plugin):")
 	fmt.Println()
@@ -92,6 +96,8 @@ func runListProviders() {
 	fmt.Println("Use any Steampipe plugin with 'plugin: org/name@version' in your config.")
 }
 
+// runDownloadPlugins loads all configs and pre-downloads any plugin binaries
+// not already present in the cache or local Steampipe install directory.
 func runDownloadPlugins(logger zerolog.Logger) {
 	flags := parseFlags(os.Args[2:])
 	configPathRaw := flagOrDefault(flags, "config", defaultConfigPath())

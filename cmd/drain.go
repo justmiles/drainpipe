@@ -60,6 +60,9 @@ type accountSetup struct {
 	orgAccount   *provider.AccountInfo
 }
 
+// runDrain is the main entrypoint for the drain command. It loads config,
+// connects to PostgreSQL, resolves plugins and accounts, validates schemas,
+// and runs the worker pool to collect all configured tables.
 func runDrain(logger zerolog.Logger) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

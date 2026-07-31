@@ -204,6 +204,8 @@ func validateSchemas(
 
 // supportedTables returns a map of table name → natural key columns for all
 // tables that have discoverable natural keys. tableKeyOverrides take precedence.
+//
+// No error returns are expected during normal operation.
 func supportedTables(exp *exporter.Exporter, preferredKey string, tableKeyOverrides map[string][]string) (map[string][]string, error) {
 	allSchemas, err := exp.GetAllSchemas()
 	if err != nil {

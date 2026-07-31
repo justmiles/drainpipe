@@ -16,6 +16,7 @@ import (
 	"github.com/justmiles/drainpipe/cmd/internal/schema"
 )
 
+// arnAccountRe extracts the 12-digit AWS account ID from an ARN (capture group 1).
 var arnAccountRe = regexp.MustCompile(`^arn:[^:]+:[^:]+:[^:]*:(\d{12}):`)
 
 // Importer handles the staging table import pattern for loading data into PostgreSQL.
@@ -47,6 +48,8 @@ type ImportResult struct {
 // `columns` is the full list of data columns from the plugin schema.
 // `naturalKeys` are the columns used for deduplication (from GetCallKeyColumnList).
 // All operations happen within a single transaction, scoped to _source_account.
+//
+// No error returns are expected during normal operation.
 func (imp *Importer) Import(ctx context.Context, pgTable string, naturalKeys []string, columns []string, rows <-chan exporter.Row) (*ImportResult, error) {
 	start := time.Now()
 	log := imp.logger.With().Str("table", pgTable).Logger()
@@ -109,6 +112,8 @@ func (imp *Importer) Import(ctx context.Context, pgTable string, naturalKeys []s
 
 // createStagingTable creates a temp table matching the live table but without
 // the drainpipe-managed columns (tracking + _source_account).
+//
+// No error returns are expected during normal operation.
 func (imp *Importer) createStagingTable(ctx context.Context, tx pgx.Tx, stagingTable, liveTable string) error {
 	sql := fmt.Sprintf(
 		`CREATE TEMP TABLE %s (LIKE %s INCLUDING DEFAULTS) ON COMMIT DROP`,
@@ -136,6 +141,8 @@ func (imp *Importer) createStagingTable(ctx context.Context, tx pgx.Tx, stagingT
 // Cross-account resources are filtered: if a row's ARN contains an account ID
 // that differs from sourceAccount, it's skipped. The owning account will
 // collect it as its own, avoiding duplicate rows from shared/peered resources.
+//
+// No error returns are expected during normal operation.
 func (imp *Importer) loadStaging(ctx context.Context, tx pgx.Tx, stagingTable string, columns []string, rows <-chan exporter.Row) (int64, error) {
 	var skipped int64
 	count, err := tx.CopyFrom(ctx,
@@ -205,6 +212,8 @@ func rowToValues(row exporter.Row, columns []string) []interface{} {
 // the INSERT, preventing "ON CONFLICT DO UPDATE command cannot affect row a
 // second time" errors from plugins that return the same resource multiple times
 // (e.g. account-level resources iterated per zone).
+//
+// No error returns are expected during normal operation.
 func (imp *Importer) upsert(ctx context.Context, tx pgx.Tx, stagingTable, pgTable string, naturalKeys, columns []string) (int64, error) {
 	quotedCols := make([]string, len(columns))
 	for i, c := range columns {
@@ -267,6 +276,8 @@ func (imp *Importer) upsert(ctx context.Context, tx pgx.Tx, stagingTable, pgTabl
 
 // softDelete marks resources that are in the live table for THIS account
 // but not in the current staging table.
+//
+// No error returns are expected during normal operation.
 func (imp *Importer) softDelete(ctx context.Context, tx pgx.Tx, stagingTable, pgTable string, naturalKeys []string) (int64, error) {
 	var conditions []string
 	for _, key := range naturalKeys {
@@ -295,6 +306,7 @@ func (imp *Importer) softDelete(ctx context.Context, tx pgx.Tx, stagingTable, pg
 	return tag.RowsAffected(), nil
 }
 
+// contains reports whether item is present in slice.
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {

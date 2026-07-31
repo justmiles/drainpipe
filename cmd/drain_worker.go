@@ -19,12 +19,14 @@ import (
 	"github.com/justmiles/drainpipe/cmd/internal/schema"
 )
 
+// progress tracks table collection counters for periodic logging and final summary.
 type progress struct {
 	totalTables     atomic.Int64
 	completedTables atomic.Int64
 	failedTables    atomic.Int64
 }
 
+// log emits a structured progress event at INFO level.
 func (p *progress) log(logger zerolog.Logger) {
 	completed := p.completedTables.Load()
 	failed := p.failedTables.Load()
@@ -41,6 +43,7 @@ func (p *progress) log(logger zerolog.Logger) {
 		Msg("progress")
 }
 
+// workItem bundles all parameters for a single (account, table) collection operation.
 type workItem struct {
 	exp           *exporter.Exporter
 	sourceAccount string
@@ -340,6 +343,7 @@ func collectTable(ctx context.Context, item workItem, schemaMgr *schema.Manager)
 
 // collectTableFiltered runs the filter_query SQL against Postgres to get
 // qual values, then calls Export once per value and merges all rows.
+// No error returns are expected during normal operation.
 func collectTableFiltered(ctx context.Context, item workItem, schemaMgr *schema.Manager) error {
 	fq := item.filterQuery
 

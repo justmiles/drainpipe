@@ -40,6 +40,8 @@ type TableEntry struct {
 
 // UnmarshalYAML allows a TableEntry to be specified as either a plain string
 // or a mapping with "table" and optional "where" keys.
+//
+// No error returns are expected during normal operation.
 func (t *TableEntry) UnmarshalYAML(value *yaml.Node) error {
 	if value.Kind == yaml.ScalarNode {
 		t.Name = value.Value
@@ -127,8 +129,11 @@ type ConnectionConfig struct {
 // AccountEntry defines an explicit account to collect from.
 // Use this for SSO profiles or hand-picked accounts.
 type AccountEntry struct {
-	Name    string   `yaml:"name"`
-	Profile string   `yaml:"profile"`
+	// Name is a human-readable label for the account (used in logs and overrides).
+	Name string `yaml:"name"`
+	// Profile is the AWS named profile to use for this account.
+	Profile string `yaml:"profile"`
+	// Regions overrides the top-level regions list for this specific account.
 	Regions []string `yaml:"regions"`
 }
 
@@ -147,20 +152,27 @@ type OrgConfig struct {
 
 // OrgOverride defines a per-account table override.
 type OrgOverride struct {
-	Match  OverrideMatch `yaml:"match"`
-	Tables []TableEntry  `yaml:"tables"`
-	Skip   bool          `yaml:"skip"`
+	// Match defines which accounts this override targets.
+	Match OverrideMatch `yaml:"match"`
+	// Tables replaces the default table list for matching accounts.
+	Tables []TableEntry `yaml:"tables"`
+	// Skip causes matching accounts to be skipped entirely during collection.
+	Skip bool `yaml:"skip"`
 }
 
 // OverrideMatch defines which accounts an override applies to.
 type OverrideMatch struct {
+	// AccountNames is a list of glob patterns matched against account display names.
 	AccountNames []string `yaml:"account_names"`
-	AccountIDs   []string `yaml:"account_ids"`
+	// AccountIDs is a list of exact account IDs to match.
+	AccountIDs []string `yaml:"account_ids"`
 }
 
 // LoadDrainpipeConfig reads a drainpipe.yaml file, which may contain multiple
 // YAML documents separated by "---". Each document is a complete config.
 // Returns nil (not an error) if the file doesn't exist.
+//
+// No error returns are expected during normal operation.
 func LoadDrainpipeConfig(filePath string) ([]*DrainpipeConfig, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -194,6 +206,8 @@ func LoadDrainpipeConfig(filePath string) ([]*DrainpipeConfig, error) {
 // LoadAllDrainpipeConfigs loads one or more config files. Each file may
 // contain multiple YAML documents separated by "---".
 // Returns nil if no files exist.
+//
+// No error returns are expected during normal operation.
 func LoadAllDrainpipeConfigs(filePaths []string) ([]*DrainpipeConfig, error) {
 	var all []*DrainpipeConfig
 	for _, fp := range filePaths {

@@ -35,6 +35,8 @@ type HCLConnection struct {
 
 // ── plugin block with limiter sub-blocks ────────────────────────────
 
+// HCLPlugin maps to a `plugin` block in HCL config. It holds plugin-level
+// settings such as memory limits and rate limiter sub-blocks.
 type HCLPlugin struct {
 	Name        string       `hcl:"name,label"`
 	Source      string       `hcl:"source,optional"`
@@ -42,6 +44,8 @@ type HCLPlugin struct {
 	Limiters    []HCLLimiter `hcl:"limiter,block"`
 }
 
+// HCLLimiter defines a rate limiter sub-block within a `plugin {}` block.
+// See [RateLimiterDef] for field semantics.
 type HCLLimiter struct {
 	Name           string   `hcl:"name,label"`
 	BucketSize     int64    `hcl:"bucket_size,optional"`
@@ -53,6 +57,8 @@ type HCLLimiter struct {
 
 // ── drainpipe block ─────────────────────────────────────────────────
 
+// HCLDrainpipe maps to a `drainpipe` block in HCL config. It holds collection
+// job settings and references a connection block by name.
 type HCLDrainpipe struct {
 	Name       string `hcl:"name,label"`
 	Connection string `hcl:"connection,optional"`
@@ -78,6 +84,8 @@ type HCLDrainpipe struct {
 	Org          *HCLOrg          `hcl:"org,block"`
 }
 
+// HCLTableBlock maps to a `table {}` sub-block within a drainpipe block,
+// providing per-table filter, column, and key override configuration.
 type HCLTableBlock struct {
 	Name        string            `hcl:"name,label"`
 	Where       map[string]string `hcl:"where,optional"`
@@ -88,11 +96,15 @@ type HCLTableBlock struct {
 	Key []string `hcl:"key,optional"`
 }
 
+// HCLFilterQuery maps to a `filter_query {}` sub-block within a table block.
+// See [FilterQuery] for semantics.
 type HCLFilterQuery struct {
 	Column string `hcl:"column"`
 	Query  string `hcl:"query"`
 }
 
+// HCLAccount maps to an `accounts {}` sub-block within a drainpipe block.
+// Each entry defines an explicit named account to collect from.
 type HCLAccount struct {
 	Name    string   `hcl:"name"`
 	Profile string   `hcl:"profile,optional"`
@@ -115,6 +127,8 @@ type HCLOrg struct {
 	Overrides      []HCLOverride `hcl:"override,block"`
 }
 
+// HCLOverride maps to an `override {}` sub-block within an org block.
+// It defines per-account table customizations or skip rules.
 type HCLOverride struct {
 	MatchAccountNames []string     `hcl:"match_account_names,optional"`
 	MatchAccountIDs   []string     `hcl:"match_account_ids,optional"`
@@ -124,13 +138,21 @@ type HCLOverride struct {
 
 // ── Rate limiter definitions (passed to plugins via gRPC) ───────────
 
+// RateLimiterDef holds the parameters for a single rate limiter sent to the
+// Steampipe plugin via gRPC. All fields map directly to proto.RateLimiterDefinition.
 type RateLimiterDef struct {
-	Name           string
-	BucketSize     int64
-	FillRate       float64
+	// Name is the unique identifier for this limiter within the plugin.
+	Name string
+	// BucketSize is the maximum number of tokens in the bucket.
+	BucketSize int64
+	// FillRate is the token refill rate per second.
+	FillRate float64
+	// MaxConcurrency is the maximum concurrent operations allowed (0 = unlimited).
 	MaxConcurrency int64
-	Scope          []string
-	Where          string
+	// Scope is the list of column scopes that this limiter applies to.
+	Scope []string
+	// Where is an optional conditional expression that further limits the scope.
+	Where string
 }
 
 // HCLResult is the output of loading an HCL config file. It contains
@@ -157,6 +179,10 @@ func envEvalContext() *hcl.EvalContext {
 	return &hcl.EvalContext{Variables: vars}
 }
 
+// LoadHCLConfig parses an HCL config file and returns the converted result.
+// Returns nil (not an error) if the file does not exist.
+//
+// No error returns are expected during normal operation.
 func LoadHCLConfig(filePath string) (*HCLResult, error) {
 	src, err := os.ReadFile(filePath)
 	if err != nil {
@@ -183,6 +209,10 @@ func LoadHCLConfig(filePath string) (*HCLResult, error) {
 	return convertHCL(&hclFile, file, ctx)
 }
 
+// convertHCL converts a parsed HCLFile into an HCLResult, resolving connection
+// references, duration fields, and table/account blocks.
+//
+// No error returns are expected during normal operation.
 func convertHCL(hclFile *HCLFile, file *hcl.File, ctx *hcl.EvalContext) (*HCLResult, error) {
 	connMap := make(map[string]*HCLConnection, len(hclFile.Connections))
 	for i := range hclFile.Connections {
@@ -336,6 +366,8 @@ var connectionTypedFields = map[string]bool{
 // the connection block's HCL body remainder (everything except typed fields).
 // The hclsyntax Remain body shares the parent's attribute map, so we
 // must explicitly skip fields already decoded into HCLConnection.
+//
+// No error returns are expected during normal operation.
 func decodeConnectionRemain(body hcl.Body, file *hcl.File, ctx *hcl.EvalContext) (map[string]interface{}, error) {
 	if body == nil {
 		return nil, nil
@@ -396,6 +428,7 @@ func ctyToGo(val cty.Value) interface{} {
 
 // ── Format-aware config loading ─────────────────────────────────────
 
+// isHCLFile reports whether the given file path ends with the ".hcl" extension.
 func isHCLFile(path string) bool {
 	return strings.HasSuffix(path, ".hcl")
 }
@@ -403,6 +436,8 @@ func isHCLFile(path string) bool {
 // LoadAllConfigs loads config files, dispatching to HCL or YAML based
 // on file extension. Returns configs and any rate limiter definitions
 // from HCL plugin blocks.
+//
+// No error returns are expected during normal operation.
 func LoadAllConfigs(filePaths []string) ([]*DrainpipeConfig, map[string][]RateLimiterDef, error) {
 	var allConfigs []*DrainpipeConfig
 	allLimiters := make(map[string][]RateLimiterDef)

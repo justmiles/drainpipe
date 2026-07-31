@@ -16,11 +16,16 @@ import (
 	"github.com/justmiles/drainpipe/cmd/internal/provider"
 )
 
+// validationIssue describes a single finding from config validation.
 type validationIssue struct {
+	// severity is "error" or "warning".
 	severity string
-	block    string
-	table    string
-	msg      string
+	// block identifies the config block (e.g. "block 1 (turbot/aws@latest)").
+	block string
+	// table is the table name, if the issue is table-specific.
+	table string
+	// msg is the human-readable description of the issue.
+	msg string
 }
 
 // runValidate loads configs, downloads plugins (without real credentials), and
@@ -317,6 +322,8 @@ func validateTableColumns(
 	return issues
 }
 
+// printValidationResults writes all validation issues to stderr and logs a
+// summary. Exits with code 1 if any errors are present.
 func printValidationResults(allIssues []validationIssue, numConfigs, totalTables int, logger zerolog.Logger) {
 	errCount, warnCount := 0, 0
 	for _, issue := range allIssues {

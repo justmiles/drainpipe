@@ -35,6 +35,8 @@ func Load() *Config {
 	}
 }
 
+// getEnv returns the value of the environment variable named by key, or
+// fallback if the variable is not set.
 func getEnv(key, fallback string) string {
 	if v, ok := os.LookupEnv(key); ok {
 		return v

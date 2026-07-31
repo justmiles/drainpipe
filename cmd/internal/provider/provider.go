@@ -33,10 +33,14 @@ type AccountConfig struct {
 type MultiAccountProvider interface {
 	// DiscoverAccounts lists accounts in the organization.
 	// Returns nil (single-account fallback) when org mode is not configured.
+	//
+	// No error returns are expected during normal operation.
 	DiscoverAccounts(ctx context.Context) ([]AccountInfo, error)
 
 	// AssumeAccountRole obtains temporary credentials for a specific account.
 	// Called just-in-time by workers, so credentials are always fresh.
+	//
+	// No error returns are expected during normal operation.
 	AssumeAccountRole(ctx context.Context, account AccountInfo) (*AccountConfig, error)
 }
 

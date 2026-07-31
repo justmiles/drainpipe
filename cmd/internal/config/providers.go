@@ -211,6 +211,7 @@ func connectionConfigFromMap(m map[string]interface{}) string {
 	return strings.Join(parts, "\n")
 }
 
+// hclValue converts a Go value to its HCL literal representation.
 func hclValue(v interface{}) string {
 	switch val := v.(type) {
 	case string:
