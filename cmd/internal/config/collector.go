@@ -136,6 +136,10 @@ type ProviderDefaults struct {
 	// key resolution produces duplicates. Takes precedence over NaturalKey and
 	// plugin-advertised key columns, but is overridden by per-table key in config.
 	TableKeys map[string][]string
+	// DefaultLimiters are applied to the plugin when the user has not configured
+	// any limiters via a plugin {} block. They set a safe baseline for providers
+	// with strict API rate limits. User-defined limiters always take precedence.
+	DefaultLimiters []RateLimiterDef
 }
 
 // KnownProviders maps short provider names to their default plugin settings.
@@ -167,6 +171,13 @@ var KnownProviders = map[string]ProviderDefaults{
 			// Zone settings share the same id (e.g. "ssl", "cache_level") across
 			// every zone; zone_id is required to uniquely identify a row.
 			"cloudflare_zone_setting": {"id", "zone_id"},
+		},
+		// Cloudflare's API allows ~1200 req/5min (~4 req/s) for most plans.
+		// These defaults keep drainpipe well under that limit. Override via a
+		// plugin "cloudflare" { limiter … } block in your HCL config.
+		DefaultLimiters: []RateLimiterDef{
+			{Name: "cloudflare_concurrency", MaxConcurrency: 2},
+			{Name: "cloudflare_rate", FillRate: 3, BucketSize: 10},
 		},
 	},
 }
@@ -201,6 +212,17 @@ func (c *DrainpipeConfig) ResolveIdentity() (table, column string) {
 		}
 	}
 	return table, column
+}
+
+// ResolveDefaultLimiters returns the provider's default rate limiter
+// definitions. Returns nil when the provider is unknown or has no defaults.
+// These are only applied when the user has not configured any limiters via a
+// plugin {} block — user-defined limiters always take full precedence.
+func (c *DrainpipeConfig) ResolveDefaultLimiters() []RateLimiterDef {
+	if defaults, ok := KnownProviders[c.Provider]; ok {
+		return defaults.DefaultLimiters
+	}
+	return nil
 }
 
 // ResolveProviderTableKeys returns per-table key overrides from the known

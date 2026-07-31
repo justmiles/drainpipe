@@ -400,18 +400,29 @@ func runDrain(logger zerolog.Logger) {
 			})
 		}
 
-		var limiterDefs []*proto.RateLimiterDefinition
-		if rateLimiters != nil {
-			for _, rl := range rateLimiters[pluginRef.Name] {
-				limiterDefs = append(limiterDefs, &proto.RateLimiterDefinition{
-					Name:           rl.Name,
-					BucketSize:     rl.BucketSize,
-					FillRate:       float32(rl.FillRate),
-					MaxConcurrency: rl.MaxConcurrency,
-					Scope:          rl.Scope,
-					Where:          rl.Where,
-				})
+		// Resolve effective rate limiters: user-configured plugin {} block takes
+		// full precedence; fall back to provider defaults when none are set.
+		effectiveLimiters := rateLimiters[pluginRef.Name]
+		if len(effectiveLimiters) == 0 {
+			effectiveLimiters = drainpipeCfg.ResolveDefaultLimiters()
+			if len(effectiveLimiters) > 0 {
+				cfgLog.Info().
+					Str("provider", drainpipeCfg.Provider).
+					Int("limiters", len(effectiveLimiters)).
+					Msg("applying provider default rate limiters (override via plugin {} block)")
 			}
+		}
+
+		var limiterDefs []*proto.RateLimiterDefinition
+		for _, rl := range effectiveLimiters {
+			limiterDefs = append(limiterDefs, &proto.RateLimiterDefinition{
+				Name:           rl.Name,
+				BucketSize:     rl.BucketSize,
+				FillRate:       float32(rl.FillRate),
+				MaxConcurrency: rl.MaxConcurrency,
+				Scope:          rl.Scope,
+				Where:          rl.Where,
+			})
 		}
 
 		for _, setup := range accountSetups {
