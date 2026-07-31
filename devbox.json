@@ -3,6 +3,7 @@
   "packages": [
     "go@1.26",
     "gcc@14.2.0",
+    "golangci-lint@latest",
     "powerpipe@latest",
     "cloudflared@latest",
     "postgresql@latest",
@@ -40,6 +41,11 @@
       ],
       "pgweb": [
         "pgweb --bind 0.0.0.0 --listen 25578"
+      ],
+      "lint": [
+        "cd cmd && golangci-lint run ./...",
+        "echo '--- checking file lengths (max 500 lines) ---'",
+        "failed=0; for f in $(find . -name '*.go' -not -path '*/vendor/*'); do lines=$(wc -l < \"$f\"); if [ \"$lines\" -gt 500 ]; then echo \"FAIL $f: $lines lines (max 500)\"; failed=1; fi; done; [ \"$failed\" -eq 0 ] && echo 'all files OK' || exit 1"
       ]
     }
   }
