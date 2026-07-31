@@ -164,6 +164,9 @@ var KnownProviders = map[string]ProviderDefaults{
 		// those are handled by DISTINCT ON deduplication in the importer.
 		TableKeys: map[string][]string{
 			"cloudflare_managed_transform": {"id", "zone_id"},
+			// Zone settings share the same id (e.g. "ssl", "cache_level") across
+			// every zone; zone_id is required to uniquely identify a row.
+			"cloudflare_zone_setting": {"id", "zone_id"},
 		},
 	},
 }
