@@ -174,10 +174,11 @@ func runDrain(logger zerolog.Logger) {
 		tableEntries   []config.TableEntry
 		orgAccount     *provider.AccountInfo
 		drainpipeCfg   *config.DrainpipeConfig
-		preferredKey   string
-		identityTable  string
-		identityColumn string
-		strict         bool
+		preferredKey      string
+		identityTable     string
+		identityColumn    string
+		sourceAccountQual string // injected as a qual on every table query when non-empty
+		strict            bool
 		deepHydration  bool
 		retries        int
 		retryDelay     time.Duration
@@ -240,6 +241,7 @@ func runDrain(logger zerolog.Logger) {
 		// Resolve config-driven settings
 		preferredKey := drainpipeCfg.ResolveNaturalKey()
 		identityTable, identityColumn := drainpipeCfg.ResolveIdentity()
+		sourceAccountQual := drainpipeCfg.ResolveSourceAccountQual()
 
 		// Resolve operational settings
 		concurrency := 1
@@ -436,10 +438,11 @@ func runDrain(logger zerolog.Logger) {
 				tableEntries:   setup.tableEntries,
 				orgAccount:     setup.orgAccount,
 				drainpipeCfg:   drainpipeCfg,
-				preferredKey:   preferredKey,
-				identityTable:  identityTable,
-				identityColumn: identityColumn,
-				strict:         strict,
+				preferredKey:      preferredKey,
+				identityTable:     identityTable,
+				identityColumn:    identityColumn,
+				sourceAccountQual: sourceAccountQual,
+				strict:            strict,
 				retries:        retries,
 				retryDelay:     retryDelay,
 				tableTimeout:   tableTimeout,
@@ -589,6 +592,18 @@ func runDrain(logger zerolog.Logger) {
 				// Per-table explicit key overrides supported map entry.
 				if len(te.Key) > 0 {
 					job.supported[tableName] = te.Key
+				}
+			}
+		}
+
+		// Apply provider default filter queries for tables that don't have an
+		// explicit filter_query in the user config. This runs before the sort
+		// so defaults are included in the filter_query ordering.
+		defaultFQs := job.drainpipeCfg.ResolveDefaultFilterQueries()
+		for _, tableName := range job.tables {
+			if _, hasExplicit := job.filterQueries[tableName]; !hasExplicit {
+				if fq, hasDefault := defaultFQs[tableName]; hasDefault {
+					job.filterQueries[tableName] = fq
 				}
 			}
 		}
@@ -755,12 +770,24 @@ func runDrain(logger zerolog.Logger) {
 						return
 					}
 
+					tableWhere := job.where[tableName]
+					if job.sourceAccountQual != "" && sourceAccount != "" {
+						if _, alreadySet := tableWhere[job.sourceAccountQual]; !alreadySet {
+							merged := make(map[string]string, len(tableWhere)+1)
+							for k, v := range tableWhere {
+								merged[k] = v
+							}
+							merged[job.sourceAccountQual] = sourceAccount
+							tableWhere = merged
+						}
+					}
+
 					item := workItem{
 						exp:           exp,
 						sourceAccount: sourceAccount,
 						tableName:     tableName,
 						naturalKeys:   job.supported[tableName],
-						where:         job.where[tableName],
+						where:         tableWhere,
 						columns:       job.columns[tableName],
 						filterQuery:   job.filterQueries[tableName],
 						deepHydration: job.deepHydration,

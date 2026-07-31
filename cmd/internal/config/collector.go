@@ -140,6 +140,16 @@ type ProviderDefaults struct {
 	// any limiters via a plugin {} block. They set a safe baseline for providers
 	// with strict API rate limits. User-defined limiters always take precedence.
 	DefaultLimiters []RateLimiterDef
+	// SourceAccountQual, when set, causes drainpipe to inject the resolved
+	// source account as an equality qual under this column name for every table
+	// query. Use for providers whose tables require an account/subscription ID
+	// qual that drainpipe already knows from the identity lookup.
+	SourceAccountQual string
+	// DefaultFilterQueries provides filter_query defaults for tables that
+	// require a dynamic qual (e.g. zone_id) resolved from an already-collected
+	// table. Only applied when the user has not configured an explicit
+	// filter_query for the table. User config always takes full precedence.
+	DefaultFilterQueries map[string]*FilterQuery
 }
 
 // KnownProviders maps short provider names to their default plugin settings.
@@ -171,6 +181,9 @@ var KnownProviders = map[string]ProviderDefaults{
 			// Zone settings share the same id (e.g. "ssl", "cache_level") across
 			// every zone; zone_id is required to uniquely identify a row.
 			"cloudflare_zone_setting": {"id", "zone_id"},
+			// Logpush job IDs are per-zone integers; the same integer can identify
+			// different jobs in different zones.
+			"cloudflare_logpush_job": {"id", "zone_id"},
 		},
 		// Cloudflare's API allows ~1200 req/5min (~4 req/s) for most plans.
 		// These defaults keep drainpipe well under that limit. Override via a
@@ -178,6 +191,19 @@ var KnownProviders = map[string]ProviderDefaults{
 		DefaultLimiters: []RateLimiterDef{
 			{Name: "cloudflare_concurrency", MaxConcurrency: 2},
 			{Name: "cloudflare_rate", FillRate: 3, BucketSize: 10},
+		},
+		// The Cloudflare plugin requires account_id as a qual on several tables.
+		// Drainpipe injects the resolved source account automatically so users
+		// don't have to hard-code it in their where blocks.
+		SourceAccountQual: "account_id",
+		// cloudflare_logpush_job also requires zone_id. We resolve zone IDs
+		// from the already-collected cloudflare_zone table via filter_query,
+		// which also ensures zone collection runs first due to sort ordering.
+		DefaultFilterQueries: map[string]*FilterQuery{
+			"cloudflare_logpush_job": {
+				Column: "zone_id",
+				Query:  "SELECT id FROM cloudflare_zone WHERE _deleted_at IS NULL",
+			},
 		},
 	},
 }
@@ -212,6 +238,26 @@ func (c *DrainpipeConfig) ResolveIdentity() (table, column string) {
 		}
 	}
 	return table, column
+}
+
+// ResolveSourceAccountQual returns the column name that should receive the
+// source account value as an automatic equality qual on every table query.
+// Returns "" when the provider has no such requirement.
+func (c *DrainpipeConfig) ResolveSourceAccountQual() string {
+	if defaults, ok := KnownProviders[c.Provider]; ok {
+		return defaults.SourceAccountQual
+	}
+	return ""
+}
+
+// ResolveDefaultFilterQueries returns provider-level default filter_query
+// entries for specific tables. Only applied when the user has not configured
+// an explicit filter_query for the table.
+func (c *DrainpipeConfig) ResolveDefaultFilterQueries() map[string]*FilterQuery {
+	if defaults, ok := KnownProviders[c.Provider]; ok {
+		return defaults.DefaultFilterQueries
+	}
+	return nil
 }
 
 // ResolveDefaultLimiters returns the provider's default rate limiter
