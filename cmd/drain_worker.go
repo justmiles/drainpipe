@@ -45,17 +45,18 @@ func (p *progress) log(logger zerolog.Logger) {
 
 // workItem bundles all parameters for a single (account, table) collection operation.
 type workItem struct {
-	exp           *exporter.Exporter
-	sourceAccount string
-	tableName     string
-	naturalKeys   []string
-	where         map[string]string
-	columns       []string
-	filterQuery   *config.FilterQuery
-	deepHydration bool
-	accountName   string
-	pool          *pgxpool.Pool
-	logger        zerolog.Logger
+	exp                    *exporter.Exporter
+	sourceAccount          string
+	tableName              string
+	naturalKeys            []string
+	where                  map[string]string
+	columns                []string
+	filterQuery            *config.FilterQuery
+	deepHydration          bool
+	skipCrossAccountFilter bool
+	accountName            string
+	pool                   *pgxpool.Pool
+	logger                 zerolog.Logger
 }
 
 // runWorkerPool starts the worker pool (Phase 2) that processes account jobs concurrently.
@@ -192,16 +193,17 @@ func runWorkerPool(
 					}
 
 					item := workItem{
-						exp:           exp,
-						sourceAccount: sourceAccount,
-						tableName:     tableName,
-						naturalKeys:   job.supported[tableName],
-						where:         tableWhere,
-						columns:       job.columns[tableName],
-						filterQuery:   job.filterQueries[tableName],
-						deepHydration: job.deepHydration,
-						accountName:   job.accountName,
-						pool:          pool,
+						exp:                    exp,
+						sourceAccount:          sourceAccount,
+						tableName:              tableName,
+						naturalKeys:            job.supported[tableName],
+						where:                  tableWhere,
+						columns:                job.columns[tableName],
+						filterQuery:            job.filterQueries[tableName],
+						deepHydration:          job.deepHydration,
+						skipCrossAccountFilter: job.crossAccountFilterExclude[tableName],
+						accountName:            job.accountName,
+						pool:                   pool,
 						logger: acctLog.With().
 							Str("table", tableName).
 							Logger(),
@@ -318,7 +320,7 @@ func collectTable(ctx context.Context, item workItem, schemaMgr *schema.Manager)
 	tableStart := time.Now()
 
 	rowCh, errCh := item.exp.Export(ctx, item.tableName, exportColumns, item.where)
-	imp := importer.New(item.pool, item.sourceAccount, item.logger.With().Str("component", "importer").Logger())
+	imp := importer.New(item.pool, item.sourceAccount, item.skipCrossAccountFilter, item.logger.With().Str("component", "importer").Logger())
 	result, err := imp.Import(ctx, item.tableName, item.naturalKeys, columns, rowCh)
 	if err != nil {
 		return fmt.Errorf("import: %w", err)
@@ -417,7 +419,7 @@ func collectTableFiltered(ctx context.Context, item workItem, schemaMgr *schema.
 		}
 	}()
 
-	imp := importer.New(item.pool, item.sourceAccount, item.logger.With().Str("component", "importer").Logger())
+	imp := importer.New(item.pool, item.sourceAccount, item.skipCrossAccountFilter, item.logger.With().Str("component", "importer").Logger())
 	result, err := imp.Import(ctx, item.tableName, item.naturalKeys, columns, mergedRows)
 	if err != nil {
 		return fmt.Errorf("import: %w", err)

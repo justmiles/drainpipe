@@ -21,18 +21,23 @@ var arnAccountRe = regexp.MustCompile(`^arn:[^:]+:[^:]+:[^:]*:(\d{12}):`)
 
 // Importer handles the staging table import pattern for loading data into PostgreSQL.
 type Importer struct {
-	pool             *pgxpool.Pool
-	sourceAccount string
-	logger           zerolog.Logger
+	pool                    *pgxpool.Pool
+	sourceAccount           string
+	skipCrossAccountFilter  bool
+	logger                  zerolog.Logger
 }
 
 // New creates a new Importer.
 // sourceAccount is the resolved account ID for scoping operations.
-func New(pool *pgxpool.Pool, sourceAccount string, logger zerolog.Logger) *Importer {
+// skipCrossAccountFilter disables the cross-account ARN filter in loadStaging
+// for tables whose rows are expected to describe other accounts by design
+// (e.g. an org-wide account directory collected from a single account).
+func New(pool *pgxpool.Pool, sourceAccount string, skipCrossAccountFilter bool, logger zerolog.Logger) *Importer {
 	return &Importer{
-		pool:             pool,
-		sourceAccount: sourceAccount,
-		logger:           logger,
+		pool:                   pool,
+		sourceAccount:          sourceAccount,
+		skipCrossAccountFilter: skipCrossAccountFilter,
+		logger:                 logger,
 	}
 }
 
@@ -169,10 +174,11 @@ func (imp *Importer) loadStaging(ctx context.Context, tx pgx.Tx, stagingTable st
 }
 
 // isCrossAccount checks if a row's ARN belongs to a different account than
-// the one being collected. Returns false (keep the row) if there's no ARN
-// or no sourceAccount to compare against.
+// the one being collected. Returns false (keep the row) if there's no ARN,
+// no sourceAccount to compare against, or the table opted out via
+// skipCrossAccountFilter.
 func (imp *Importer) isCrossAccount(row exporter.Row) bool {
-	if imp.sourceAccount == "" {
+	if imp.skipCrossAccountFilter || imp.sourceAccount == "" {
 		return false
 	}
 	arn, _ := row["arn"].(string)

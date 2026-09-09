@@ -36,6 +36,7 @@ type accountJob struct {
 	identityColumn    string
 	sourceAccountQual        string
 	sourceAccountQualExclude map[string]bool
+	crossAccountFilterExclude map[string]bool
 	strict                   bool
 	deepHydration     bool
 	retries           int
@@ -188,6 +189,7 @@ func buildAllJobs(
 		identityTable, identityColumn := drainpipeCfg.ResolveIdentity()
 		sourceAccountQual := drainpipeCfg.ResolveSourceAccountQual()
 		sourceAccountQualExclude := drainpipeCfg.ResolveSourceAccountQualExcludeTables()
+		crossAccountFilterExclude := drainpipeCfg.ResolveCrossAccountFilterExcludeTables()
 
 		concurrency := 1
 		retries := 3
@@ -267,6 +269,7 @@ func buildAllJobs(
 				identityColumn:    identityColumn,
 				sourceAccountQual:        sourceAccountQual,
 				sourceAccountQualExclude: sourceAccountQualExclude,
+				crossAccountFilterExclude: crossAccountFilterExclude,
 				strict:                   strict,
 				retries:           retries,
 				retryDelay:        retryDelay,

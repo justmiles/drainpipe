@@ -108,6 +108,23 @@ func TestResolveNaturalKey_UnknownProvider(t *testing.T) {
 	}
 }
 
+// ---------- ResolveCrossAccountFilterExcludeTables ----------
+
+func TestResolveCrossAccountFilterExcludeTables_AWSExcludesOrgAccountTable(t *testing.T) {
+	cfg := &DrainpipeConfig{Provider: "aws"}
+	got := cfg.ResolveCrossAccountFilterExcludeTables()
+	if !got["aws_organizations_account"] {
+		t.Error(`aws_organizations_account should be excluded from the cross-account filter`)
+	}
+}
+
+func TestResolveCrossAccountFilterExcludeTables_UnknownProvider(t *testing.T) {
+	cfg := &DrainpipeConfig{Provider: "unknown"}
+	if got := cfg.ResolveCrossAccountFilterExcludeTables(); got != nil {
+		t.Errorf("got %v, want nil", got)
+	}
+}
+
 // ---------- ResolveConnectionHCL ----------
 
 func TestResolveConnectionHCL_FromExtra(t *testing.T) {

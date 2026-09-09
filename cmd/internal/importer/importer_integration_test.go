@@ -49,7 +49,7 @@ func TestIntegration_Import_InsertsRows(t *testing.T) {
 	setupTable(t, table)
 	pool := testutil.NewTestPool(t)
 
-	imp := New(pool, "acct-111", zerolog.Nop())
+	imp := New(pool, "acct-111", false, zerolog.Nop())
 	columns := []string{"arn", "name", "region"}
 	rows := feedRows(
 		exporter.Row{"arn": "arn:aws:s3:::bucket-a", "name": "bucket-a", "region": "us-east-1"},
@@ -83,7 +83,7 @@ func TestIntegration_Import_UpsertsExisting(t *testing.T) {
 	pool := testutil.NewTestPool(t)
 	columns := []string{"arn", "name", "region"}
 
-	imp := New(pool, "acct-222", zerolog.Nop())
+	imp := New(pool, "acct-222", false, zerolog.Nop())
 
 	// First import
 	rows1 := feedRows(
@@ -124,7 +124,7 @@ func TestIntegration_Import_SoftDeletes(t *testing.T) {
 	pool := testutil.NewTestPool(t)
 	columns := []string{"arn", "name", "region"}
 
-	imp := New(pool, "acct-333", zerolog.Nop())
+	imp := New(pool, "acct-333", false, zerolog.Nop())
 
 	// Import 3 rows
 	rows1 := feedRows(
@@ -169,7 +169,7 @@ func TestIntegration_Import_ScopedByDrainpipeAccount(t *testing.T) {
 	columns := []string{"arn", "name", "region"}
 
 	// Import for account A
-	impA := New(pool, "acct-A", zerolog.Nop())
+	impA := New(pool, "acct-A", false, zerolog.Nop())
 	rowsA := feedRows(
 		exporter.Row{"arn": "arn:A1", "name": "a1", "region": "us-east-1"},
 		exporter.Row{"arn": "arn:A2", "name": "a2", "region": "us-east-1"},
@@ -179,7 +179,7 @@ func TestIntegration_Import_ScopedByDrainpipeAccount(t *testing.T) {
 	}
 
 	// Import for account B
-	impB := New(pool, "acct-B", zerolog.Nop())
+	impB := New(pool, "acct-B", false, zerolog.Nop())
 	rowsB := feedRows(
 		exporter.Row{"arn": "arn:B1", "name": "b1", "region": "eu-west-1"},
 	)
@@ -212,13 +212,58 @@ func TestIntegration_Import_ScopedByDrainpipeAccount(t *testing.T) {
 	}
 }
 
+func TestIntegration_Import_FiltersCrossAccountByDefault(t *testing.T) {
+	table := "test_import_cross_account"
+	setupTable(t, table)
+	pool := testutil.NewTestPool(t)
+	columns := []string{"arn", "name", "region"}
+
+	imp := New(pool, "111111111111", false, zerolog.Nop())
+	rows := feedRows(
+		exporter.Row{"arn": "arn:aws:organizations::111111111111:account/o-x/111111111111", "name": "self", "region": "us-east-1"},
+		exporter.Row{"arn": "arn:aws:organizations::111111111111:account/o-x/222222222222", "name": "member", "region": "us-east-1"},
+	)
+
+	result, err := imp.Import(context.Background(), table, []string{"arn"}, columns, rows)
+	if err != nil {
+		t.Fatalf("Import() error = %v", err)
+	}
+	if result.Rows != 1 {
+		t.Errorf("Rows = %d, want 1 (the cross-account row should be filtered)", result.Rows)
+	}
+}
+
+func TestIntegration_Import_SkipCrossAccountFilterKeepsForeignRows(t *testing.T) {
+	table := "test_import_cross_account_skip"
+	setupTable(t, table)
+	pool := testutil.NewTestPool(t)
+	columns := []string{"arn", "name", "region"}
+
+	// Regression test for the aws_organizations_account bug: a single-account
+	// job whose whole purpose is to list *other* accounts must not have its
+	// rows dropped by the cross-account filter.
+	imp := New(pool, "111111111111", true, zerolog.Nop())
+	rows := feedRows(
+		exporter.Row{"arn": "arn:aws:organizations::111111111111:account/o-x/111111111111", "name": "self", "region": "us-east-1"},
+		exporter.Row{"arn": "arn:aws:organizations::111111111111:account/o-x/222222222222", "name": "member", "region": "us-east-1"},
+	)
+
+	result, err := imp.Import(context.Background(), table, []string{"arn"}, columns, rows)
+	if err != nil {
+		t.Fatalf("Import() error = %v", err)
+	}
+	if result.Rows != 2 {
+		t.Errorf("Rows = %d, want 2 (skipCrossAccountFilter should keep both rows)", result.Rows)
+	}
+}
+
 func TestIntegration_Import_EmptyChannel(t *testing.T) {
 	table := "test_import_empty"
 	setupTable(t, table)
 	pool := testutil.NewTestPool(t)
 	columns := []string{"arn", "name", "region"}
 
-	imp := New(pool, "acct-empty", zerolog.Nop())
+	imp := New(pool, "acct-empty", false, zerolog.Nop())
 	rows := feedRows() // no rows
 
 	result, err := imp.Import(context.Background(), table, []string{"arn"}, columns, rows)

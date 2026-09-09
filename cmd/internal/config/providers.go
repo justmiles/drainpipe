@@ -37,6 +37,13 @@ type ProviderDefaults struct {
 	// exclusive (e.g. Cloudflare's logpush API rejects requests that supply
 	// both account_id and zone_id).
 	SourceAccountQualExcludeTables map[string]bool
+	// CrossAccountFilterExcludeTables is the set of tables that must NOT
+	// receive the importer's cross-account ARN filter. Use for tables that,
+	// by design, describe accounts/resources other than the one they were
+	// collected from — e.g. an org-wide account directory table queried from
+	// a single management account. Filtering those by "does the ARN's account
+	// match sourceAccount" would drop every row.
+	CrossAccountFilterExcludeTables map[string]bool
 }
 
 // KnownProviders maps short provider names to their default plugin settings.
@@ -46,6 +53,14 @@ var KnownProviders = map[string]ProviderDefaults{
 		IdentityTable:  "aws_sts_caller_identity",
 		IdentityColumn: "account_id",
 		NaturalKey:     "arn",
+		// aws_organizations_account is a directory of every account in the
+		// organization, collected from a single management-account connection.
+		// Its rows' ARNs necessarily belong to other accounts, so the importer's
+		// cross-account filter must be disabled for it — otherwise every row
+		// looks "cross-account" and the table never loads any data.
+		CrossAccountFilterExcludeTables: map[string]bool{
+			"aws_organizations_account": true,
+		},
 	},
 	"azure": {
 		Plugin:         "turbot/azure@latest",
@@ -162,6 +177,16 @@ func (c *DrainpipeConfig) ResolveDefaultFilterQueries() map[string]*FilterQuery 
 func (c *DrainpipeConfig) ResolveSourceAccountQualExcludeTables() map[string]bool {
 	if defaults, ok := KnownProviders[c.Provider]; ok {
 		return defaults.SourceAccountQualExcludeTables
+	}
+	return nil
+}
+
+// ResolveCrossAccountFilterExcludeTables returns the set of tables that must
+// not receive the importer's cross-account ARN filter. Returns nil when the
+// provider has no such exclusions.
+func (c *DrainpipeConfig) ResolveCrossAccountFilterExcludeTables() map[string]bool {
+	if defaults, ok := KnownProviders[c.Provider]; ok {
+		return defaults.CrossAccountFilterExcludeTables
 	}
 	return nil
 }
