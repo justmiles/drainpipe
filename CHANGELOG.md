@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Cloudflare provider default rate limiters
+- Cloudflare logpush job missing quals resolution
+
+### Changed
+
+- Cloudflare zone setting composite key now includes id and zone_id
+
+### Fixed
+
+- Cloudflare provider key resolution and reserved keyword column quoting
+- Cloudflare logpush bad request handling and reduced rate limit defaults
+- AWS organizations account rows no longer incorrectly filtered as cross-account
+
 ## [0.1.1] - 2026-06-01
 
 ### Added
