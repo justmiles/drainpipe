@@ -321,16 +321,14 @@ func buildAccountSetups(
 					configParts = append(configParts, fmt.Sprintf("  regions = [%s]", strings.Join(quoted, ", ")))
 				}
 
-				acctEntries := cfgTableEntries
+				overrides, skip := drainpipeCfg.TablesForAccount("", entry.Name)
+				if skip {
+					cfgLog.Info().Str("account_name", entry.Name).Msg("skipping account (config override)")
+					continue
+				}
+				acctEntries := overrides
 				if len(acctEntries) == 0 {
-					overrides, skip := drainpipeCfg.TablesForAccount("", entry.Name)
-					if skip {
-						cfgLog.Info().Str("account_name", entry.Name).Msg("skipping account (config override)")
-						continue
-					}
-					if len(overrides) > 0 {
-						acctEntries = overrides
-					}
+					acctEntries = cfgTableEntries
 				}
 
 				setups = append(setups, accountSetup{
@@ -348,16 +346,14 @@ func buildAccountSetups(
 			}
 			if len(accounts) > 0 {
 				for _, acct := range accounts {
-					acctEntries := cfgTableEntries
+					overrides, skip := drainpipeCfg.TablesForAccount(acct.AccountID, acct.AccountName)
+					if skip {
+						cfgLog.Info().Str("account_id", acct.AccountID).Msg("skipping account (config override)")
+						continue
+					}
+					acctEntries := overrides
 					if len(acctEntries) == 0 {
-						overrides, skip := drainpipeCfg.TablesForAccount(acct.AccountID, acct.AccountName)
-						if skip {
-							cfgLog.Info().Str("account_id", acct.AccountID).Msg("skipping account (config override)")
-							continue
-						}
-						if len(overrides) > 0 {
-							acctEntries = overrides
-						}
+						acctEntries = cfgTableEntries
 					}
 					acctCopy := acct
 					setups = append(setups, accountSetup{
@@ -378,16 +374,14 @@ func buildAccountSetups(
 				cfgLog.Fatal().Err(err).Msg("failed to discover Azure subscriptions")
 			}
 			for _, sub := range subs {
-				acctEntries := cfgTableEntries
+				overrides, skip := drainpipeCfg.TablesForAccount(sub.SubscriptionID, sub.DisplayName)
+				if skip {
+					cfgLog.Info().Str("subscription_id", sub.SubscriptionID).Msg("skipping subscription (config override)")
+					continue
+				}
+				acctEntries := overrides
 				if len(acctEntries) == 0 {
-					overrides, skip := drainpipeCfg.TablesForAccount(sub.SubscriptionID, sub.DisplayName)
-					if skip {
-						cfgLog.Info().Str("subscription_id", sub.SubscriptionID).Msg("skipping subscription (config override)")
-						continue
-					}
-					if len(overrides) > 0 {
-						acctEntries = overrides
-					}
+					acctEntries = cfgTableEntries
 				}
 				setups = append(setups, accountSetup{
 					connConfig:   sub.ConnectionConfig,

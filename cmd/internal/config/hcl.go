@@ -130,10 +130,14 @@ type HCLOrg struct {
 // HCLOverride maps to an `override {}` sub-block within an org block.
 // It defines per-account table customizations or skip rules.
 type HCLOverride struct {
-	MatchAccountNames []string     `hcl:"match_account_names,optional"`
-	MatchAccountIDs   []string     `hcl:"match_account_ids,optional"`
-	Tables            []string     `hcl:"tables,optional"`
-	Skip              bool         `hcl:"skip,optional"`
+	MatchAccountNames []string `hcl:"match_account_names,optional"`
+	MatchAccountIDs   []string `hcl:"match_account_ids,optional"`
+	// Tables replaces the default table list for matching accounts.
+	Tables []string `hcl:"tables,optional"`
+	// SkipTables removes the named tables from the default list for matching accounts.
+	// Cannot be combined with Tables.
+	SkipTables []string `hcl:"skip_tables,optional"`
+	Skip       bool     `hcl:"skip,optional"`
 }
 
 // ── Rate limiter definitions (passed to plugins via gRPC) ───────────
@@ -327,7 +331,8 @@ func convertHCL(hclFile *HCLFile, file *hcl.File, ctx *hcl.EvalContext) (*HCLRes
 						AccountNames: ov.MatchAccountNames,
 						AccountIDs:   ov.MatchAccountIDs,
 					},
-					Skip: ov.Skip,
+					Skip:       ov.Skip,
+					SkipTables: ov.SkipTables,
 				}
 				for _, t := range ov.Tables {
 					override.Tables = append(override.Tables, TableEntry{Name: t})

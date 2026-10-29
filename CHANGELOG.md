@@ -20,7 +20,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Cloudflare provider key resolution and reserved keyword column quoting
 - Cloudflare logpush bad request handling and rate limit defaults
-- AWS organizations account cross-account filtering
+
+## [0.1.3] - 2026-10-29
+
+### Added
+
+- `skip_tables` field for HCL `override {}` blocks: exclude named tables from
+  the default list without having to enumerate every other table
+
+### Fixed
+
+- Override blocks are now applied even when a global `tables` list is present;
+  previously they were silently ignored whenever `cfgTableEntries` was non-empty
+
+## [0.1.2] - 2026-10-29
+
+### Fixed
+
+- AWS organizations account rows no longer filtered out as cross-account results
 
 ## [0.1.1] - 2026-06-01
 

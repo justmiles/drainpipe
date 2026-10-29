@@ -156,6 +156,9 @@ type OrgOverride struct {
 	Match OverrideMatch `yaml:"match"`
 	// Tables replaces the default table list for matching accounts.
 	Tables []TableEntry `yaml:"tables"`
+	// SkipTables removes the named tables from the default list for matching accounts.
+	// Cannot be combined with Tables.
+	SkipTables []string `yaml:"skip_tables"`
 	// Skip causes matching accounts to be skipped entirely during collection.
 	Skip bool `yaml:"skip"`
 }
@@ -264,6 +267,11 @@ func (c *DrainpipeConfig) EffectiveOrg() *OrgConfig {
 // checking overrides in order. Returns:
 //   - entries: table entries to collect (nil = use default)
 //   - skip: true if the account should be skipped entirely
+//
+// Override precedence (first match wins):
+//   - skip = true: account is excluded entirely
+//   - tables: replaces the default table list
+//   - skip_tables: removes named tables from the default list
 func (c *DrainpipeConfig) TablesForAccount(accountID, accountName string) (entries []TableEntry, skip bool) {
 	if c == nil || c.Connection.Org == nil {
 		return c.defaultTables(), false
@@ -276,6 +284,19 @@ func (c *DrainpipeConfig) TablesForAccount(accountID, accountName string) (entri
 			}
 			if len(override.Tables) > 0 {
 				return override.Tables, false
+			}
+			if len(override.SkipTables) > 0 {
+				excluded := make(map[string]bool, len(override.SkipTables))
+				for _, t := range override.SkipTables {
+					excluded[t] = true
+				}
+				var result []TableEntry
+				for _, t := range c.defaultTables() {
+					if !excluded[t.Name] {
+						result = append(result, t)
+					}
+				}
+				return result, false
 			}
 		}
 	}
