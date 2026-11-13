@@ -274,3 +274,62 @@ func TestIntegration_Import_EmptyChannel(t *testing.T) {
 		t.Errorf("Rows = %d, want 0", result.Rows)
 	}
 }
+
+func TestIntegration_Import_SkipsNullNaturalKeyRows(t *testing.T) {
+	table := "test_import_null_natural_key"
+	setupTable(t, table)
+	pool := testutil.NewTestPool(t)
+	columns := []string{"arn", "name", "region"}
+
+	// Regression test: a provider can return a resource in a transitional
+	// state with no natural key (e.g. an AWS SNS subscription with no ARN
+	// yet). The staging table declares natural-key columns NOT NULL, so
+	// including such a row aborted the whole COPY and failed the table for
+	// the entire account. The keyless row should be dropped instead, leaving
+	// every other resource importable.
+	imp := New(pool, "", false, zerolog.Nop())
+	rows := feedRows(
+		exporter.Row{"arn": "arn:aws:sns:us-east-1:111111111111:topic:sub-1", "name": "confirmed", "region": "us-east-1"},
+		exporter.Row{"arn": nil, "name": "pending-no-arn", "region": "us-east-1"},
+		exporter.Row{"arn": "arn:aws:sns:us-east-1:111111111111:topic:sub-2", "name": "confirmed-2", "region": "us-east-1"},
+	)
+
+	result, err := imp.Import(context.Background(), table, []string{"arn"}, columns, rows)
+	if err != nil {
+		t.Fatalf("Import() error = %v (the null-key row should be skipped, not fail the import)", err)
+	}
+	if result.Rows != 2 {
+		t.Errorf("Rows = %d, want 2 (the null natural-key row should be skipped)", result.Rows)
+	}
+}
+
+func TestIntegration_Import_NullNaturalKeyDoesNotSoftDeleteLiveRows(t *testing.T) {
+	table := "test_import_null_key_softdelete"
+	setupTable(t, table)
+	pool := testutil.NewTestPool(t)
+	columns := []string{"arn", "name", "region"}
+	keyed := "arn:aws:sns:us-east-1:111111111111:topic:keeper"
+
+	imp := New(pool, "", false, zerolog.Nop())
+
+	// Seed a live row.
+	if _, err := imp.Import(context.Background(), table, []string{"arn"}, columns, feedRows(
+		exporter.Row{"arn": keyed, "name": "keeper", "region": "us-east-1"},
+	)); err != nil {
+		t.Fatalf("seed Import() error = %v", err)
+	}
+
+	// A later run returns the same resource plus an unkeyable one. The
+	// keyed row must survive — skipping the keyless row must not make the
+	// run look like a deletion.
+	result, err := imp.Import(context.Background(), table, []string{"arn"}, columns, feedRows(
+		exporter.Row{"arn": keyed, "name": "keeper", "region": "us-east-1"},
+		exporter.Row{"arn": nil, "name": "pending-no-arn", "region": "us-east-1"},
+	))
+	if err != nil {
+		t.Fatalf("Import() error = %v", err)
+	}
+	if result.Deleted != 0 {
+		t.Errorf("Deleted = %d, want 0 (skipping a keyless row must not soft-delete live rows)", result.Deleted)
+	}
+}

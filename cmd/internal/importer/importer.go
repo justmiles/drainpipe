@@ -74,7 +74,7 @@ func (imp *Importer) Import(ctx context.Context, pgTable string, naturalKeys []s
 	log.Debug().Msg("staging table created")
 
 	// Step 2: Load rows into staging table
-	rowCount, err := imp.loadStaging(ctx, tx, stagingTable, columns, rows)
+	rowCount, err := imp.loadStaging(ctx, tx, stagingTable, columns, naturalKeys, rows)
 	if err != nil {
 		return nil, fmt.Errorf("loading staging table: %w", err)
 	}
@@ -147,9 +147,13 @@ func (imp *Importer) createStagingTable(ctx context.Context, tx pgx.Tx, stagingT
 // that differs from sourceAccount, it's skipped. The owning account will
 // collect it as its own, avoiding duplicate rows from shared/peered resources.
 //
+// Rows whose natural key is null are also skipped, and logged at warn level.
+// See [missingNaturalKey] for why dropping the row is preferred over letting
+// the COPY abort.
+//
 // No error returns are expected during normal operation.
-func (imp *Importer) loadStaging(ctx context.Context, tx pgx.Tx, stagingTable string, columns []string, rows <-chan exporter.Row) (int64, error) {
-	var skipped int64
+func (imp *Importer) loadStaging(ctx context.Context, tx pgx.Tx, stagingTable string, columns, naturalKeys []string, rows <-chan exporter.Row) (int64, error) {
+	var skipped, nullKeySkipped int64
 	count, err := tx.CopyFrom(ctx,
 		pgx.Identifier{stagingTable},
 		columns,
@@ -163,6 +167,13 @@ func (imp *Importer) loadStaging(ctx context.Context, tx pgx.Tx, stagingTable st
 					skipped++
 					continue
 				}
+				if missing := missingNaturalKey(row, naturalKeys); missing != "" {
+					nullKeySkipped++
+					imp.logger.Debug().
+						Str("column", missing).
+						Msg("skipping row with null natural key")
+					continue
+				}
 				return rowToValues(row, columns), nil
 			}
 		}),
@@ -170,7 +181,39 @@ func (imp *Importer) loadStaging(ctx context.Context, tx pgx.Tx, stagingTable st
 	if skipped > 0 {
 		imp.logger.Debug().Int64("skipped", skipped).Msg("filtered cross-account resources")
 	}
+	if nullKeySkipped > 0 {
+		// Warn, not error: one unidentifiable row shouldn't fail the whole
+		// table, but it is worth surfacing since it means the provider
+		// returned a resource we cannot key or reconcile.
+		imp.logger.Warn().
+			Int64("skipped", nullKeySkipped).
+			Strs("natural_keys", naturalKeys).
+			Msg("skipped rows with a null natural key")
+	}
 	return count, err
+}
+
+// missingNaturalKey returns the name of the first natural-key column that is
+// nil for this row, or "" if all are present.
+//
+// A row whose natural key is null cannot be keyed, upserted, or reconciled
+// against the live table, and the staging table declares natural-key columns
+// NOT NULL — so including it aborts the entire COPY and fails the table for
+// the whole account. Some providers return such rows for resources in a
+// transitional state (e.g. an AWS SNS subscription that has no ARN yet),
+// so dropping the row is strictly better than dropping the table: every
+// other resource still imports.
+//
+// Skipping is also safe with respect to soft-deletes. A row that cannot be
+// keyed was never importable, so it has no counterpart in the live table that
+// could be falsely marked deleted by its absence from staging.
+func missingNaturalKey(row exporter.Row, naturalKeys []string) string {
+	for _, k := range naturalKeys {
+		if row[k] == nil {
+			return k
+		}
+	}
+	return ""
 }
 
 // isCrossAccount checks if a row's ARN belongs to a different account than

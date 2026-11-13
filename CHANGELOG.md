@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Cloudflare provider key resolution and reserved keyword column quoting
 - Cloudflare logpush bad request handling and rate limit defaults
+- Rows with a null natural key are now skipped and logged at warn level
+  instead of aborting the staging COPY. Previously a single unkeyable row
+  failed the entire table for that account (e.g. `aws_sns_topic_subscription`
+  when AWS returns a subscription with no ARN). Skipping cannot cause a false
+  soft-delete, since a row that was never importable has no live counterpart.
 
 ## [0.1.3] - 2026-10-29
 
