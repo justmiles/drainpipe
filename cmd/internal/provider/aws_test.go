@@ -201,3 +201,42 @@ func TestNewAWSMultiAccount(t *testing.T) {
 		t.Errorf("Regions = %v, want [us-east-1]", ma.Regions)
 	}
 }
+
+// ---------- partitionFromARN ----------
+
+func TestPartitionFromARN(t *testing.T) {
+	valid := map[string]string{
+		"arn:aws:sts::111111111111:assumed-role/central/s":        "aws",
+		"arn:aws-us-gov:sts::222222222222:assumed-role/central/s": "aws-us-gov",
+		"arn:aws-cn:iam::333333333333:user/u":                     "aws-cn",
+	}
+	for in, want := range valid {
+		got, err := partitionFromARN(in)
+		if err != nil {
+			t.Errorf("partitionFromARN(%q) unexpected error: %v", in, err)
+		} else if got != want {
+			t.Errorf("partitionFromARN(%q) = %q, want %q", in, got, want)
+		}
+	}
+	for _, in := range []string{"", "not-an-arn", "arn::sts::1:x"} {
+		if got, err := partitionFromARN(in); err == nil {
+			t.Errorf("partitionFromARN(%q) = %q, want error", in, got)
+		}
+	}
+}
+
+func TestMemberRoleARN(t *testing.T) {
+	cases := []struct{ caller, want string }{
+		{"arn:aws-us-gov:sts::222222222222:assumed-role/central/s", "arn:aws-us-gov:iam::999999999999:role/drain"},
+		{"arn:aws:sts::111111111111:assumed-role/central/s", "arn:aws:iam::999999999999:role/drain"},
+	}
+	for _, c := range cases {
+		partition, err := partitionFromARN(c.caller)
+		if err != nil {
+			t.Fatalf("partitionFromARN(%q): %v", c.caller, err)
+		}
+		if got := memberRoleARN(partition, "999999999999", "drain"); got != c.want {
+			t.Errorf("memberRoleARN for caller %q = %q, want %q", c.caller, got, c.want)
+		}
+	}
+}
