@@ -29,6 +29,8 @@ type AWSMultiAccount struct {
 	orgClient *organizations.Client
 	// stsClient is the AWS STS client used for role assumption.
 	stsClient *sts.Client
+	// partition is the caller's AWS partition (aws, aws-us-gov, aws-cn), resolved once per provider instance.
+	partition string
 }
 
 // DiscoverAccounts lists active accounts in an AWS Organization.
@@ -93,7 +95,8 @@ func (p *AWSMultiAccount) DiscoverAccounts(ctx context.Context) ([]AccountInfo, 
 
 // AssumeAccountRole obtains temporary credentials for a specific member account.
 //
-// No error returns are expected during normal operation.
+// Returns an error if the caller identity cannot be fetched or its ARN cannot be
+// parsed. No other error returns are expected during normal operation.
 func (p *AWSMultiAccount) AssumeAccountRole(ctx context.Context, account AccountInfo) (*AccountConfig, error) {
 	roleName := p.resolveAssumeRoleName()
 
@@ -101,7 +104,18 @@ func (p *AWSMultiAccount) AssumeAccountRole(ctx context.Context, account Account
 		return nil, err
 	}
 
-	roleARN := fmt.Sprintf("arn:aws:iam::%s:role/%s", account.AccountID, roleName)
+	if p.partition == "" {
+		id, err := p.stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+		if err != nil {
+			return nil, fmt.Errorf("getting caller identity: %w", err)
+		}
+		partition, err := partitionFromARN(stringVal(id.Arn))
+		if err != nil {
+			return nil, fmt.Errorf("parsing caller ARN: %w", err)
+		}
+		p.partition = partition
+	}
+	roleARN := memberRoleARN(p.partition, account.AccountID, roleName)
 
 	creds, err := p.stsClient.AssumeRole(ctx, &sts.AssumeRoleInput{
 		RoleArn:         &roleARN,
@@ -302,6 +316,22 @@ func (p *AWSMultiAccount) resolveAssumeRoleName() string {
 		return p.OrgRoleName
 	}
 	return os.Getenv("AWS_ORG_ROLE_NAME")
+}
+
+// memberRoleARN builds the IAM role ARN to assume in a member account.
+func memberRoleARN(partition, accountID, roleName string) string {
+	return fmt.Sprintf("arn:%s:iam::%s:role/%s", partition, accountID, roleName)
+}
+
+// partitionFromARN returns the partition field of an ARN ("arn:<partition>:...").
+//
+// Returns an error if the ARN is empty or malformed.
+func partitionFromARN(arn string) (string, error) {
+	parts := strings.SplitN(arn, ":", 3)
+	if len(parts) == 3 && parts[0] == "arn" && parts[1] != "" {
+		return parts[1], nil
+	}
+	return "", fmt.Errorf("malformed ARN %q: want arn:<partition>:...", arn)
 }
 
 // stringVal safely dereferences a *string, returning "" if nil.
